@@ -1,9 +1,25 @@
 """Matching engine, built incrementally: storage and order creation first."""
 
+from dataclasses import dataclass
 from decimal import Decimal
 
 from .book import BookSide
-from .models import Order, OrderKind, PegReference, Side, Trade
+from .models import Order, OrderKind, PegReference, Side, Trade, _validate_id
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """Individual executions and discarded quantity from one submission."""
+
+    order_id: str
+    trades: tuple[Trade, ...] = ()
+    discarded_qty: int = 0
+
+    def aggregated_trades(self) -> tuple[tuple[Decimal, int], ...]:
+        totals: dict[Decimal, int] = {}
+        for trade in self.trades:
+            totals[trade.price] = totals.get(trade.price, 0) + trade.quantity
+        return tuple(totals.items())
 
 
 class MatchingEngine:
@@ -13,11 +29,56 @@ class MatchingEngine:
         self._id_counter = 0
         self._priority_counter = 0
         self._trades: list[Trade] = []
+        self._orders: dict[str, Order] = {}
 
     @property
     def trade_history(self) -> tuple[Trade, ...]:
         """Expose execution history without allowing callers to change the list."""
         return tuple(self._trades)
+
+    def submit_limit(self, side: Side, price: Decimal, quantity: int) -> CommandResult:
+        order = self._create_order(side, OrderKind.LIMIT, quantity, limit_price=price)
+        return self._submit(order)
+
+    def submit_market(self, side: Side, quantity: int) -> CommandResult:
+        order = self._create_order(side, OrderKind.MARKET, quantity)
+        return self._submit(order)
+
+    def cancel(self, order_id: str) -> CommandResult:
+        order = self._require_order(order_id)
+        if order.effective_price is not None:
+            book = self._buys if order.side is Side.BUY else self._sells
+            book.remove(order.id)
+        self._forget(order)
+        return CommandResult(order.id)
+
+    def _require_order(self, order_id: str) -> Order:
+        """Reject missing or invalid IDs before any state changes."""
+        _validate_id(order_id)
+        if order_id not in self._orders:
+            raise ValueError(f"order {order_id!r} is not active")
+        return self._orders[order_id]
+
+    def _forget(self, order: Order) -> None:
+        """Remove an order from the outstanding lookup, not from trade history."""
+        self._orders.pop(order.id, None)
+
+    def _submit(self, order: Order) -> CommandResult:
+        start = len(self._trades)
+        self._orders[order.id] = order
+        self._match(order)
+        discarded = order.remaining_qty if order.kind is OrderKind.MARKET else 0
+        self._finish_incoming(order)
+        return CommandResult(order.id, tuple(self._trades[start:]), discarded)
+
+    def _finish_incoming(self, order: Order) -> None:
+        """Rest priced remainders; market remainders never enter a book."""
+        if order.remaining_qty == 0 or order.kind is OrderKind.MARKET: # discards market remainders
+            self._forget(order)
+            return
+        if order.effective_price is not None:
+            book = self._buys if order.side is Side.BUY else self._sells
+            book.add(order)
 
     def _create_order(
         self,
@@ -71,4 +132,5 @@ class MatchingEngine:
             incoming.remaining_qty -= quantity
             resting.remaining_qty -= quantity
             if resting.remaining_qty == 0:
-                opposite_book.remove(resting.id)
+                opposite_book.remove(resting.id) # deletes resting order if exhausted
+                self._forget(resting)

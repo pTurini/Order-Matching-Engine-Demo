@@ -156,5 +156,153 @@ class MatchingTests(unittest.TestCase):
         self.assertIsNone(self.engine._sells.best())
 
 
+class SubmissionTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = MatchingEngine()
+
+    def test_passive_limits_rest_on_correct_side(self):
+        buy = self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        sell = self.engine.submit_limit(Side.SELL, Decimal("11"), 200)
+        self.assertEqual((buy.order_id, sell.order_id), ("1", "2"))
+        self.assertEqual(buy.trades, ())
+        self.assertEqual(sell.trades, ())
+        self.assertEqual(self.engine._buys.best().remaining_qty, 100)
+        self.assertEqual(self.engine._sells.best().remaining_qty, 200)
+
+    def test_crossing_limit_rests_remainder_at_its_limit(self):
+        sell = self.engine.submit_limit(Side.SELL, Decimal("10"), 100)
+        buy = self.engine.submit_limit(Side.BUY, Decimal("11"), 150)
+        self.assertEqual((buy.trades[0].price, buy.trades[0].quantity), (Decimal("10"), 100))
+        self.assertEqual(buy.trades[0].sell_order_id, sell.order_id)
+        self.assertEqual(buy.discarded_qty, 0)
+        self.assertIsNone(self.engine._sells.best())
+        remainder = self.engine._buys.best()
+        self.assertEqual((remainder.id, remainder.effective_price, remainder.remaining_qty),
+                         (buy.order_id, Decimal("11"), 50))
+
+    def test_market_discards_remainder_and_never_rests(self):
+        self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        result = self.engine.submit_market(Side.SELL, 150)
+        self.assertEqual(result.discarded_qty, 50)
+        self.assertEqual(result.trades[0].quantity, 100)
+        self.assertIsNone(self.engine._buys.best())
+        self.assertIsNone(self.engine._sells.best())
+        empty = self.engine.submit_market(Side.BUY, 20)
+        self.assertEqual((empty.trades, empty.discarded_qty), ((), 20))
+
+    def test_email_example_aggregation_and_command_history_boundaries(self):
+        self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        first = self.engine.submit_limit(Side.SELL, Decimal("20"), 100)
+        second = self.engine.submit_limit(Side.SELL, Decimal("20"), 200)
+        result = self.engine.submit_market(Side.BUY, 150)
+        self.assertEqual([(t.sell_order_id, t.quantity) for t in result.trades],
+                         [(first.order_id, 100), (second.order_id, 50)])
+        self.assertEqual(result.aggregated_trades(), ((Decimal("20"), 150),))
+        next_result = self.engine.submit_market(Side.BUY, 200)
+        self.assertEqual(len(next_result.trades), 1)
+        self.assertEqual(next_result.aggregated_trades(), ((Decimal("20"), 150),))
+        self.assertEqual(next_result.discarded_qty, 50)
+        last = self.engine.submit_market(Side.SELL, 200)
+        self.assertEqual(last.aggregated_trades(), ((Decimal("10"), 100),))
+        self.assertEqual(last.discarded_qty, 100)
+        self.assertEqual(len(result.trades), 2)  # Earlier result is unchanged.
+        self.assertEqual(len(self.engine.trade_history), 4)
+
+    def test_limit_stops_before_ineligible_level_and_exact_prices_stay_separate(self):
+        self.engine.submit_limit(Side.SELL, Decimal("10.001"), 10)
+        self.engine.submit_limit(Side.SELL, Decimal("10.002"), 10)
+        self.engine.submit_limit(Side.SELL, Decimal("11"), 10)
+        result = self.engine.submit_limit(Side.BUY, Decimal("10.5"), 30)
+        self.assertEqual(result.aggregated_trades(),
+                         ((Decimal("10.001"), 10), (Decimal("10.002"), 10)))
+        self.assertEqual(self.engine._buys.best().remaining_qty, 10)
+        self.assertEqual(self.engine._sells.best().effective_price, Decimal("11"))
+
+    def test_invalid_submission_leaves_books_history_and_counters_unchanged(self):
+        self.engine.submit_limit(Side.SELL, Decimal("10"), 100)
+        before = (self.engine._buys.orders(), self.engine._sells.orders(),
+                  self.engine.trade_history, self.engine._id_counter, self.engine._priority_counter)
+        for submit in (
+            lambda: self.engine.submit_limit(Side.BUY, Decimal("11"), 0),
+            lambda: self.engine.submit_limit(Side.BUY, 11.0, 50),
+            lambda: self.engine.submit_limit(Side.BUY, Decimal("NaN"), 50),
+            lambda: self.engine.submit_market("buy", 50),
+            lambda: self.engine.submit_market(Side.BUY, True),
+        ):
+            with self.assertRaises(ValueError):
+                submit()
+            after = (self.engine._buys.orders(), self.engine._sells.orders(),
+                     self.engine.trade_history, self.engine._id_counter, self.engine._priority_counter)
+            self.assertEqual(after, before)
+        self.assertEqual(self.engine._sells.best().remaining_qty, 100)
+
+
+class CancellationTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = MatchingEngine()
+
+    def test_cancel_middle_order_preserves_other_orders_and_counters(self):
+        results = [self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+                   for _ in range(3)]
+        counters = (self.engine._id_counter, self.engine._priority_counter)
+        result = self.engine.cancel(results[1].order_id)
+        self.assertEqual((result.order_id, result.trades, result.discarded_qty),
+                         (results[1].order_id, (), 0))
+        expected = [results[0].order_id, results[2].order_id]
+        self.assertEqual([order.id for order in self.engine._buys.orders()], expected)
+        self.assertEqual(list(self.engine._orders), expected)
+        self.assertEqual((self.engine._id_counter, self.engine._priority_counter), counters)
+
+    def test_cancel_partially_filled_sell_preserves_trade_history(self):
+        result = self.engine.submit_limit(Side.SELL, Decimal("10"), 100)
+        live = self.engine._orders[result.order_id]
+        self.assertIs(live, self.engine._sells.best())
+        self.engine.submit_market(Side.BUY, 40)
+        self.assertEqual(live.remaining_qty, 60)
+        history = self.engine.trade_history
+        self.engine.cancel(result.order_id)
+        self.assertEqual(self.engine._orders, {})
+        self.assertIsNone(self.engine._sells.best())
+        self.assertEqual(self.engine.trade_history, history)
+        next_order = self.engine.submit_limit(Side.SELL, Decimal("10"), 100)
+        self.assertNotEqual(next_order.order_id, result.order_id)
+
+    def test_completed_orders_and_market_remainders_leave_lookup(self):
+        sell = self.engine.submit_limit(Side.SELL, Decimal("10"), 100)
+        buy = self.engine.submit_limit(Side.BUY, Decimal("11"), 100)
+        self.assertEqual(self.engine._orders, {})
+        market = self.engine.submit_market(Side.BUY, 50)
+        self.assertEqual(market.discarded_qty, 50)
+        self.assertEqual(self.engine._orders, {})
+        for order_id in (sell.order_id, buy.order_id, market.order_id):
+            with self.assertRaisesRegex(ValueError, "not active"):
+                self.engine.cancel(order_id)
+
+    def test_limit_remainder_remains_registered_and_can_be_cancelled(self):
+        self.engine.submit_limit(Side.SELL, Decimal("10"), 100)
+        result = self.engine.submit_limit(Side.BUY, Decimal("11"), 150)
+        self.assertEqual(list(self.engine._orders), [result.order_id])
+        self.assertEqual(self.engine._orders[result.order_id].remaining_qty, 50)
+        self.engine.cancel(result.order_id)
+        self.assertEqual(self.engine._orders, {})
+        self.assertIsNone(self.engine._buys.best())
+
+    def test_invalid_and_repeated_cancellation_leave_state_unchanged(self):
+        result = self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        order = self.engine._orders[result.order_id]
+        for invalid in ("missing", "", None, [], 1):
+            with self.assertRaises(ValueError):
+                self.engine.cancel(invalid)
+            self.assertIs(self.engine._orders[result.order_id], order)
+            self.assertIs(self.engine._buys.best(), order)
+            self.assertEqual(order.remaining_qty, 100)
+            self.assertEqual(self.engine.trade_history, ())
+        self.engine.cancel(result.order_id)
+        with self.assertRaises(ValueError):
+            self.engine.cancel(result.order_id)
+        self.assertEqual(self.engine._orders, {})
+        self.assertIsNone(self.engine._buys.best())
+
+
 if __name__ == "__main__":
     unittest.main()
