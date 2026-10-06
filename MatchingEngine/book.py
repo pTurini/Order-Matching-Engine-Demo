@@ -14,6 +14,7 @@ class BookSide:
         if not isinstance(side, Side):
             raise ValueError("side must be a Side")
         self.side = side
+        self._prices: list[Decimal] = []  # All occupied prices, ascending.
         self._levels: dict[Decimal, OrderedDict[str, Order]] = {}
         self._locations: dict[str, Decimal] = {}
         self._fixed_counts: dict[Decimal, int] = {}
@@ -31,6 +32,7 @@ class BookSide:
 
         price = order.effective_price
         if price not in self._levels:
+            insort(self._prices, price)
             self._levels[price] = OrderedDict()
         self._levels[price][order.id] = order
         self._locations[order.id] = price
@@ -55,15 +57,17 @@ class BookSide:
                 self._fixed_prices.pop(index)
         if not queue:
             del self._levels[price]
+            index = bisect_left(self._prices, price)
+            self._prices.pop(index)
         return order
 
     def best(self) -> Order | None:
-        if not self._levels:
+        if not self._prices:
             return None
         if self.side is Side.BUY:
-            price = max(self._levels)
+            price = self._prices[-1]
         else:
-            price = min(self._levels)
+            price = self._prices[0]
         return next(iter(self._levels[price].values()))
 
     def fixed_reference(self) -> Decimal | None:
@@ -76,7 +80,7 @@ class BookSide:
 
     def orders(self) -> list[Order]:
         """Return individual orders in best-price order, FIFO within each price."""
-        prices = sorted(self._levels, reverse=self.side is Side.BUY)
+        prices = reversed(self._prices) if self.side is Side.BUY else self._prices
         result = []
         for price in prices:
             result.extend(self._levels[price].values())

@@ -133,6 +133,33 @@ class BookTests(unittest.TestCase):
         self.assertEqual(book._fixed_prices, [Decimal("11")])
         self.assertEqual(book.fixed_reference(), Decimal("11"))
 
+    def test_all_price_index_tracks_unique_levels_until_last_order_removed(self):
+        book = BookSide(Side.BUY)
+        for order_id, price in (("1", "11"), ("2", "9"), ("3", "10"), ("4", "10")):
+            book.add(self.order(order_id, Side.BUY, price))
+        self.assertEqual(book._prices, list(map(Decimal, ("9", "10", "11"))))
+        book.remove("3")
+        self.assertEqual(book._prices, list(map(Decimal, ("9", "10", "11"))))
+        book.remove("4")
+        self.assertEqual(book._prices, list(map(Decimal, ("9", "11"))))
+        book.remove("1")
+        self.assertEqual(book.best().id, "2")
+        book.remove("2")
+        self.assertEqual(book._prices, [])
+        self.assertIsNone(book.best())
+
+    def test_all_price_index_includes_peg_only_levels(self):
+        book = BookSide(Side.SELL)
+        peg = Order("1", Side.SELL, OrderKind.PEGGED, 100, 1,
+                    peg_reference=PegReference.OFFER, effective_price=Decimal("10"))
+        book.add(peg)
+        self.assertEqual(book._prices, [Decimal("10")])
+        self.assertEqual(book._fixed_prices, [])
+        self.assertIs(book.best(), peg)
+        self.assertIsNone(book.fixed_reference())
+        book.remove(peg.id)
+        self.assertEqual(book._prices, [])
+
     def test_invalid_insertions_leave_book_unchanged(self):
         book = BookSide(Side.BUY)
         valid = self.order("1", Side.BUY, "10")
