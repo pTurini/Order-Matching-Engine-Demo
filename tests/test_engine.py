@@ -448,5 +448,79 @@ class PriceAmendmentTests(unittest.TestCase):
             self.assertEqual(self.engine.trade_history, ())
 
 
+class PegPlacementTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = MatchingEngine()
+
+    def test_primary_pegs_join_behind_fixed_orders_on_both_sides(self):
+        for side, reference in ((Side.BUY, PegReference.BID),
+                                (Side.SELL, PegReference.OFFER)):
+            with self.subTest(side=side):
+                engine = MatchingEngine()
+                fixed = engine.submit_limit(side, Decimal("10"), 100)
+                result = engine.submit_peg(side, reference, 50)
+                book = engine._buys if side is Side.BUY else engine._sells
+                self.assertEqual([o.id for o in book.orders()], [fixed.order_id, result.order_id])
+                peg = engine._orders[result.order_id]
+                self.assertIs(engine._pegs[result.order_id], peg)
+                self.assertEqual(peg.effective_price, Decimal("10"))
+                self.assertIsNone(peg.limit_price)
+                self.assertEqual(result.trades, ())
+
+    def test_all_combinations_wait_without_reference_and_can_be_cancelled(self):
+        for side in Side:
+            for reference in PegReference:
+                with self.subTest(side=side, reference=reference):
+                    engine = MatchingEngine()
+                    result = engine.submit_peg(side, reference, 50)
+                    self.assertIsNone(engine._orders[result.order_id].effective_price)
+                    self.assertIn(result.order_id, engine._pegs)
+                    self.assertEqual(engine._buys.orders(), [])
+                    self.assertEqual(engine._sells.orders(), [])
+                    engine.amend(result.order_id, quantity=80)
+                    self.assertEqual(engine._pegs[result.order_id].remaining_qty, 80)
+                    engine.cancel(result.order_id)
+                    self.assertEqual(engine._orders, {})
+                    self.assertEqual(engine._pegs, {})
+
+    def test_opposite_side_pegs_execute_and_completed_pegs_leave_registries(self):
+        for side, reference, resting_side in (
+            (Side.BUY, PegReference.OFFER, Side.SELL),
+            (Side.SELL, PegReference.BID, Side.BUY),
+        ):
+            with self.subTest(side=side):
+                engine = MatchingEngine()
+                fixed = engine.submit_limit(resting_side, Decimal("10"), 100)
+                result = engine.submit_peg(side, reference, 40)
+                self.assertEqual((result.trades[0].price, result.trades[0].quantity),
+                                 (Decimal("10"), 40))
+                self.assertNotIn(result.order_id, engine._orders)
+                self.assertNotIn(result.order_id, engine._pegs)
+                self.assertEqual(engine._orders[fixed.order_id].remaining_qty, 60)
+
+    def test_resting_peg_cleanup_when_filled_and_manual_price_rejected(self):
+        self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        result = self.engine.submit_peg(Side.BUY, PegReference.BID, 50)
+        peg = self.engine._pegs[result.order_id]
+        priority = peg.priority_sequence
+        with self.assertRaises(ValueError):
+            self.engine.amend(result.order_id, price=Decimal("11"), quantity=80)
+        self.assertEqual((peg.remaining_qty, peg.effective_price, peg.priority_sequence),
+                         (50, Decimal("10"), priority))
+        self.engine.submit_market(Side.SELL, 150)
+        self.assertEqual(self.engine._pegs, {})
+        self.assertEqual(self.engine._orders, {})
+
+    def test_invalid_peg_submission_does_not_advance_counters(self):
+        for side, reference, quantity in ((Side.BUY, "bid", 50),
+                                          ("buy", PegReference.BID, 50),
+                                          (Side.BUY, PegReference.BID, 0)):
+            with self.assertRaises(ValueError):
+                self.engine.submit_peg(side, reference, quantity)
+            self.assertEqual(self.engine._pegs, {})
+            self.assertEqual(self.engine._orders, {})
+            self.assertEqual((self.engine._id_counter, self.engine._priority_counter), (0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()

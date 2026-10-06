@@ -31,6 +31,7 @@ class MatchingEngine:
         self._priority_counter = 0
         self._trades: list[Trade] = []
         self._orders: dict[str, Order] = {}
+        self._pegs: dict[str, Order] = {}
 
     @property
     def trade_history(self) -> tuple[Trade, ...]:
@@ -43,6 +44,14 @@ class MatchingEngine:
 
     def submit_market(self, side: Side, quantity: int) -> CommandResult:
         order = self._create_order(side, OrderKind.MARKET, quantity)
+        return self._submit(order)
+
+    def submit_peg(self, side: Side, reference: PegReference, quantity: int) -> CommandResult:
+        order = self._create_order(side, OrderKind.PEGGED, quantity,
+                                   peg_reference=reference)
+        reference_book = self._buys if reference is PegReference.BID else self._sells
+        order.effective_price = reference_book.fixed_reference()
+        self._pegs[order.id] = order
         return self._submit(order)
 
     def cancel(self, order_id: str) -> CommandResult:
@@ -102,6 +111,7 @@ class MatchingEngine:
     def _forget(self, order: Order) -> None:
         """Remove an order from the outstanding lookup, not from trade history."""
         self._orders.pop(order.id, None)
+        self._pegs.pop(order.id, None)
 
     def _submit(self, order: Order) -> CommandResult:
         start = len(self._trades)
