@@ -61,6 +61,29 @@ class BookTests(unittest.TestCase):
             book.remove("1")
         self.assertIsNone(book.best())
 
+    def test_location_index_stays_synchronized_when_order_moves(self):
+        book = BookSide(Side.BUY)
+        order = self.order("1", Side.BUY, "10")
+        book.add(order)
+        self.assertEqual(book._locations, {"1": Decimal("10")})
+        book.remove("1")
+        self.assertEqual(book._locations, {})
+        order.limit_price = Decimal("11")
+        order.effective_price = Decimal("11")
+        book.add(order)
+        self.assertEqual(book._locations, {"1": Decimal("11")})
+        self.assertNotIn(Decimal("10"), book._levels)
+        self.assertIs(book.best(), order)
+
+    def test_duplicate_id_at_different_price_does_not_change_index(self):
+        book = BookSide(Side.BUY)
+        original = self.order("1", Side.BUY, "10")
+        book.add(original)
+        with self.assertRaises(ValueError):
+            book.add(self.order("1", Side.BUY, "11"))
+        self.assertEqual(book._locations, {"1": Decimal("10")})
+        self.assertEqual(book.orders(), [original])
+
     def test_invalid_insertions_leave_book_unchanged(self):
         book = BookSide(Side.BUY)
         valid = self.order("1", Side.BUY, "10")
