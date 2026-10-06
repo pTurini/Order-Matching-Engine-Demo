@@ -26,6 +26,41 @@ class BookTests(unittest.TestCase):
         book.add(self.order("2", Side.SELL, "10"))
         self.assertEqual(book.best().id, "2")
 
+    def test_remove_middle_order_preserves_fifo_and_returns_original(self):
+        book = BookSide(Side.BUY)
+        orders = [self.order(str(i), Side.BUY, "10") for i in (1, 2, 3)]
+        for order in orders:
+            book.add(order)
+        self.assertIs(book.remove("2"), orders[1])
+        self.assertEqual([order.id for order in book.orders()], ["1", "3"])
+        self.assertIs(book.best(), orders[0])
+        book.remove("1")
+        self.assertIs(book.best(), orders[2])
+
+    def test_remove_last_order_cleans_level_and_updates_best(self):
+        book = BookSide(Side.SELL)
+        book.add(self.order("1", Side.SELL, "10"))
+        book.add(self.order("2", Side.SELL, "11"))
+        book.remove("1")
+        self.assertNotIn(Decimal("10"), book._levels)
+        self.assertEqual(book.best().id, "2")
+        book.remove("2")
+        self.assertEqual(book._levels, {})
+        self.assertIsNone(book.best())
+        self.assertEqual(book.orders(), [])
+
+    def test_remove_unknown_id_leaves_book_unchanged(self):
+        book = BookSide(Side.BUY)
+        order = self.order("1", Side.BUY, "10")
+        book.add(order)
+        with self.assertRaisesRegex(ValueError, "not in this book side"):
+            book.remove("missing")
+        self.assertEqual(book.orders(), [order])
+        book.remove("1")
+        with self.assertRaises(ValueError):
+            book.remove("1")
+        self.assertIsNone(book.best())
+
     def test_invalid_insertions_leave_book_unchanged(self):
         book = BookSide(Side.BUY)
         valid = self.order("1", Side.BUY, "10")
