@@ -52,11 +52,13 @@ For one incoming order:
 6. Remove any fully filled resting order.
 7. Update peg references before choosing the next match.
 8. Repeat until the incoming order finishes or cannot match.
-The eligibility check differs:
+
+The eligibility differs per order type:
 - Market: accepts any available price.
 - Limit buy: accepts sells at or below its limit.
 - Limit sell: accepts buys at or above its limit.
 - Peg: uses its current effective price, which could change.
+
 After matching:
 - A limit remainder rests.
 - A market remainder is discarded.
