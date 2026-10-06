@@ -1,5 +1,6 @@
 """Order book storage, built incrementally."""
 
+from bisect import bisect_left, insort
 from collections import OrderedDict
 from decimal import Decimal
 
@@ -15,6 +16,8 @@ class BookSide:
         self.side = side
         self._levels: dict[Decimal, OrderedDict[str, Order]] = {}
         self._locations: dict[str, Decimal] = {}
+        self._fixed_counts: dict[Decimal, int] = {}
+        self._fixed_prices: list[Decimal] = []
 
     def add(self, order: Order) -> None:
         if order.side is not self.side:
@@ -31,6 +34,11 @@ class BookSide:
             self._levels[price] = OrderedDict()
         self._levels[price][order.id] = order
         self._locations[order.id] = price
+        if order.kind is OrderKind.LIMIT:
+            if price not in self._fixed_counts:
+                self._fixed_counts[price] = 0
+                insort(self._fixed_prices, price)
+            self._fixed_counts[price] += 1
 
     def remove(self, order_id: str) -> Order:
         """Remove an individual order, preserving the queue order."""
@@ -39,6 +47,12 @@ class BookSide:
         price = self._locations.pop(order_id)
         queue = self._levels[price]
         order = queue.pop(order_id)
+        if order.kind is OrderKind.LIMIT:
+            self._fixed_counts[price] -= 1
+            if self._fixed_counts[price] == 0:
+                del self._fixed_counts[price]
+                index = bisect_left(self._fixed_prices, price)
+                self._fixed_prices.pop(index)
         if not queue:
             del self._levels[price]
         return order
@@ -51,6 +65,14 @@ class BookSide:
         else:
             price = min(self._levels)
         return next(iter(self._levels[price].values()))
+
+    def fixed_reference(self) -> Decimal | None:
+        """Return the best fixed limit price, excluding every pegged order."""
+        if not self._fixed_prices:
+            return None
+        if self.side is Side.BUY:
+            return self._fixed_prices[-1]
+        return self._fixed_prices[0]
 
     def orders(self) -> list[Order]:
         """Return individual orders in best-price order, FIFO within each price."""

@@ -2,7 +2,7 @@ import unittest
 from decimal import Decimal
 
 from MatchingEngine.book import BookSide
-from MatchingEngine.models import Order, OrderKind, Side
+from MatchingEngine.models import Order, OrderKind, PegReference, Side
 
 
 class BookTests(unittest.TestCase):
@@ -83,6 +83,55 @@ class BookTests(unittest.TestCase):
             book.add(self.order("1", Side.BUY, "11"))
         self.assertEqual(book._locations, {"1": Decimal("10")})
         self.assertEqual(book.orders(), [original])
+
+    def test_fixed_references_choose_highest_bid_and_lowest_offer(self):
+        for side, expected in ((Side.BUY, "11"), (Side.SELL, "9")):
+            with self.subTest(side=side):
+                book = BookSide(side)
+                self.assertIsNone(book.fixed_reference())
+                for order_id, price in (("1", "10"), ("2", "9"), ("3", "11")):
+                    book.add(self.order(order_id, side, price))
+                self.assertEqual(book._fixed_prices, list(map(Decimal, ("9", "10", "11"))))
+                self.assertEqual(book.fixed_reference(), Decimal(expected))
+
+    def test_last_fixed_removal_clears_reference_even_with_peg_remaining(self):
+        book = BookSide(Side.BUY)
+        book.add(self.order("1", Side.BUY, "10"))
+        book.add(self.order("2", Side.BUY, "10"))
+        peg = Order("3", Side.BUY, OrderKind.PEGGED, 100, 3,
+                    peg_reference=PegReference.BID, effective_price=Decimal("10"))
+        book.add(peg)
+        self.assertEqual(book._fixed_counts, {Decimal("10"): 2})
+        self.assertEqual(book._fixed_prices, [Decimal("10")])
+        book.remove("1")
+        self.assertEqual(book._fixed_counts[Decimal("10")], 1)
+        self.assertEqual(book.fixed_reference(), Decimal("10"))
+        book.remove("2")
+        self.assertEqual(book._fixed_counts, {})
+        self.assertEqual(book._fixed_prices, [])
+        self.assertIsNone(book.fixed_reference())
+        self.assertIs(book.best(), peg)  # Book reports references; engine will move pegs.
+        book.remove(peg.id)
+        self.assertIsNone(book.fixed_reference())
+
+    def test_partial_fill_does_not_change_fixed_order_count(self):
+        book = BookSide(Side.SELL)
+        order = self.order("1", Side.SELL, "10")
+        book.add(order)
+        order.remaining_qty = 20
+        self.assertEqual(book._fixed_counts[Decimal("10")], 1)
+        self.assertEqual(book.fixed_reference(), Decimal("10"))
+
+    def test_moving_fixed_order_updates_reference_indexes(self):
+        book = BookSide(Side.BUY)
+        order = self.order("1", Side.BUY, "10")
+        book.add(order)
+        book.remove(order.id)
+        order.limit_price = order.effective_price = Decimal("11")
+        book.add(order)
+        self.assertEqual(book._fixed_counts, {Decimal("11"): 1})
+        self.assertEqual(book._fixed_prices, [Decimal("11")])
+        self.assertEqual(book.fixed_reference(), Decimal("11"))
 
     def test_invalid_insertions_leave_book_unchanged(self):
         book = BookSide(Side.BUY)
