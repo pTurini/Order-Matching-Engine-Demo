@@ -304,5 +304,149 @@ class CancellationTests(unittest.TestCase):
         self.assertIsNone(self.engine._buys.best())
 
 
+class QuantityAmendmentTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = MatchingEngine()
+
+    def test_reduction_and_noop_preserve_priority_on_both_sides(self):
+        for side in Side:
+            with self.subTest(side=side):
+                engine = MatchingEngine()
+                first = engine.submit_limit(side, Decimal("10"), 100)
+                second = engine.submit_limit(side, Decimal("10"), 100)
+                order = engine._orders[first.order_id]
+                priority = order.priority_sequence
+                counters = (engine._id_counter, engine._priority_counter)
+                result = engine.amend(first.order_id, quantity=50)
+                engine.amend(first.order_id, quantity=50)
+                book = engine._buys if side is Side.BUY else engine._sells
+                self.assertEqual([o.id for o in book.orders()], [first.order_id, second.order_id])
+                self.assertEqual(order.remaining_qty, 50)
+                self.assertEqual(order.priority_sequence, priority)
+                self.assertEqual((engine._id_counter, engine._priority_counter), counters)
+                self.assertEqual((result.order_id, result.trades, result.discarded_qty),
+                                 (first.order_id, (), 0))
+
+    def test_increase_moves_to_back_and_execution_respects_new_priority(self):
+        first = self.engine.submit_limit(Side.SELL, Decimal("10"), 100)
+        second = self.engine.submit_limit(Side.SELL, Decimal("10"), 100)
+        live = self.engine._orders[first.order_id]
+        self.engine.amend(first.order_id, quantity=150)
+        self.assertEqual([o.id for o in self.engine._sells.orders()],
+                         [second.order_id, first.order_id])
+        self.assertIs(self.engine._orders[first.order_id], live)
+        self.assertEqual(live.priority_sequence, 3)
+        self.assertEqual(self.engine._id_counter, 2)
+        result = self.engine.submit_market(Side.BUY, 120)
+        self.assertEqual([(t.sell_order_id, t.quantity) for t in result.trades],
+                         [(second.order_id, 100), (first.order_id, 20)])
+        self.assertEqual(live.remaining_qty, 130)
+
+    def test_amended_quantity_means_remaining_after_partial_fill(self):
+        created = self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        self.engine.submit_market(Side.SELL, 40)
+        history = self.engine.trade_history
+        self.engine.amend(created.order_id, quantity=80)
+        self.assertEqual(self.engine._orders[created.order_id].remaining_qty, 80)
+        self.assertEqual(self.engine.trade_history, history)
+        result = self.engine.submit_market(Side.SELL, 100)
+        self.assertEqual(result.trades[0].quantity, 80)
+        self.assertEqual(result.discarded_qty, 20)
+
+    def test_invalid_quantity_and_inactive_id_leave_state_unchanged(self):
+        created = self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        order = self.engine._orders[created.order_id]
+        counters = (self.engine._id_counter, self.engine._priority_counter)
+        priority = order.priority_sequence
+        for quantity in (0, -1, 1.5, True, None, "100"):
+            with self.subTest(quantity=quantity), self.assertRaises(ValueError):
+                self.engine.amend(created.order_id, quantity=quantity)
+            self.assertEqual(order.remaining_qty, 100)
+            self.assertEqual(order.priority_sequence, priority)
+            self.assertIs(self.engine._buys.best(), order)
+            self.assertEqual((self.engine._id_counter, self.engine._priority_counter), counters)
+            self.assertEqual(self.engine.trade_history, ())
+        with self.assertRaises(ValueError):
+            self.engine.amend("missing", quantity=150)
+        self.assertEqual(order.remaining_qty, 100)
+        self.engine.cancel(created.order_id)
+        with self.assertRaises(ValueError):
+            self.engine.amend(created.order_id, quantity=150)
+        self.assertEqual(self.engine._orders, {})
+
+
+class PriceAmendmentTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = MatchingEngine()
+
+    def test_new_price_repositions_behind_existing_orders_and_keeps_id(self):
+        first = self.engine.submit_limit(Side.BUY, Decimal("10"), 200)
+        second = self.engine.submit_limit(Side.BUY, Decimal("9.99"), 100)
+        live = self.engine._orders[first.order_id]
+        result = self.engine.amend(first.order_id, price=Decimal("9.99"))
+        self.assertEqual([o.id for o in self.engine._buys.orders()],
+                         [second.order_id, first.order_id])
+        self.assertIs(self.engine._orders[first.order_id], live)
+        self.assertEqual((live.limit_price, live.effective_price),
+                         (Decimal("9.99"), Decimal("9.99")))
+        self.assertEqual(live.priority_sequence, 3)
+        self.assertEqual(self.engine._id_counter, 2)
+        self.assertEqual(result.trades, ())
+        self.engine.amend(first.order_id, price=Decimal("9.98"))
+        self.assertEqual([o.effective_price for o in self.engine._buys.orders()],
+                         [Decimal("9.99"), Decimal("9.98")])
+
+    def test_crossing_price_amendment_returns_only_new_trades_and_rests_remainder(self):
+        buy = self.engine.submit_limit(Side.BUY, Decimal("9"), 100)
+        self.engine.submit_market(Side.SELL, 40)
+        sell = self.engine.submit_limit(Side.SELL, Decimal("10"), 50)
+        result = self.engine.amend(buy.order_id, price=Decimal("11"), quantity=80)
+        self.assertEqual(len(result.trades), 1)
+        self.assertEqual((result.trades[0].price, result.trades[0].quantity),
+                         (Decimal("10"), 50))
+        self.assertEqual(result.trades[0].sell_order_id, sell.order_id)
+        self.assertEqual(self.engine._orders[buy.order_id].remaining_qty, 30)
+        self.assertEqual(self.engine._buys.best().effective_price, Decimal("11"))
+        self.assertEqual(len(self.engine.trade_history), 2)
+        self.assertEqual(result.discarded_qty, 0)
+
+    def test_sell_price_change_can_fill_completely_and_clean_lookup(self):
+        sell = self.engine.submit_limit(Side.SELL, Decimal("12"), 50)
+        self.engine.submit_limit(Side.BUY, Decimal("10"), 50)
+        result = self.engine.amend(sell.order_id, price=Decimal("9"))
+        self.assertEqual(result.trades[0].price, Decimal("10"))
+        self.assertEqual(result.trades[0].quantity, 50)
+        self.assertEqual(self.engine._orders, {})
+        self.assertIsNone(self.engine._sells.best())
+        self.assertIsNone(self.engine._buys.best())
+
+    def test_same_price_is_noop_but_changed_price_with_reduction_loses_priority(self):
+        first = self.engine.submit_limit(Side.SELL, Decimal("12"), 100)
+        second = self.engine.submit_limit(Side.SELL, Decimal("11"), 100)
+        order = self.engine._orders[first.order_id]
+        priority = order.priority_sequence
+        self.engine.amend(first.order_id, price=Decimal("12.00"))
+        self.assertEqual(order.priority_sequence, priority)
+        self.engine.amend(first.order_id, price=Decimal("11"), quantity=50)
+        self.assertEqual(order.remaining_qty, 50)
+        self.assertGreater(order.priority_sequence, priority)
+        self.assertEqual([o.id for o in self.engine._sells.orders()],
+                         [second.order_id, first.order_id])
+
+    def test_all_fields_are_validated_before_any_change(self):
+        result = self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        order = self.engine._orders[result.order_id]
+        for fields in ({"price": Decimal("NaN"), "quantity": 150},
+                       {"price": Decimal("-1")}, {"price": 11.0},
+                       {"price": Decimal("11"), "quantity": 0}, {}):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                self.engine.amend(result.order_id, **fields)
+            self.assertEqual((order.limit_price, order.effective_price, order.remaining_qty,
+                              order.priority_sequence), (Decimal("10"), Decimal("10"), 100, 1))
+            self.assertIs(self.engine._buys.best(), order)
+            self.assertEqual((self.engine._id_counter, self.engine._priority_counter), (1, 1))
+            self.assertEqual(self.engine.trade_history, ())
+
+
 if __name__ == "__main__":
     unittest.main()

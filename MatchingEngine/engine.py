@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from .book import BookSide
-from .models import Order, OrderKind, PegReference, Side, Trade, _validate_id
+from .models import (Order, OrderKind, PegReference, Side, Trade,
+                     _validate_id, _validate_positive_integer, _validate_price)
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,45 @@ class MatchingEngine:
             book = self._buys if order.side is Side.BUY else self._sells
             book.remove(order.id)
         self._forget(order)
+        return CommandResult(order.id)
+
+    def amend(self, order_id: str, *, quantity: int | None = None,
+              price: Decimal | None = None) -> CommandResult:
+        """Change remaining quantity/price; increases and new prices lose priority."""
+        order = self._require_order(order_id)
+        if quantity is None and price is None:
+            raise ValueError("provide a quantity or price to amend")
+        if quantity is not None:
+            _validate_positive_integer(quantity, "quantity")
+        if price is not None:
+            _validate_price(price)
+            if order.kind is not OrderKind.LIMIT:
+                raise ValueError("only fixed limit orders allow price amendments")
+        # keep old values if not explicitly updated
+        new_qty = order.remaining_qty if quantity is None else quantity
+        new_price = order.limit_price if price is None else price
+        price_changed = new_price != order.limit_price
+        if not price_changed and new_qty <= order.remaining_qty:
+            # Reductions and no-ops leave the order at its existing queue position.
+            order.remaining_qty = new_qty
+            return CommandResult(order.id)
+
+        book = self._buys if order.side is Side.BUY else self._sells
+        if order.effective_price is not None:
+            book.remove(order.id)
+        self._priority_counter += 1
+        order.priority_sequence = self._priority_counter
+        order.remaining_qty = new_qty
+
+        if price_changed:
+            order.limit_price = new_price
+            order.effective_price = new_price
+            # Rematch at the new price, then rest any remainder, as on submission.
+            return self._submit(order)
+
+        # Quantity increase only: move to the back of the unchanged price queue.
+        if order.effective_price is not None:
+            book.add(order)
         return CommandResult(order.id)
 
     def _require_order(self, order_id: str) -> Order:
