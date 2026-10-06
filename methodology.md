@@ -4,6 +4,11 @@ In this document, I will explain my methodology to solve this problem, as well a
 
 ## Architecture:
 
+The architecture is divided in 4 mains components:
+1. Models: contains the classes' structure and validation for all the corresponding data types (order, trade).
+2. Book: stores the market orders in the correct order.
+3. Engine: contains the logic of the system and the operations that must be done, given a book.
+4. CLI: provides interface for the user.
 
 ### Functions:
 Create, match, amend, or cancel orders.
@@ -22,7 +27,8 @@ Update affected pegged orders.
 | `peg_reference` | Bid or offer for a pegged order |
 | `effective_price` | Current book price; absent for an inactive peg |
 | `priority_sequence` | Increasing number identifying its latest queue position |
-## Assumptions
+
+## Assumptions:
 
 ### Logic:
 * When limit orders cross, the trade is executed at the resting order's price.
@@ -67,7 +73,8 @@ After matching:
 ### Interface and general rules:
 * On the interface, orders with same price are combined. But internally they have their own IDs and are treated separately.
 * Invalid input rejects, gives error message and does nothing to the book.
-* Quantity is an integer. No fractional shares.
+* Quantity is an integer. No fractional shares.\
+* Price must be positive and greater than zero.
 * Price precision is exact, but interface shows fixed at 0.01 precision.
 * Order IDs are unique and never reused.
 * For debugging: show individual orders, remaining quantities, IDs, priority order.
@@ -84,6 +91,16 @@ Test ideas:
 * Opposite-side pegs consuming several reference levels.
 * Missing references and reactivation.
 * Invalid commands leaving the state unchanged.
+
+### Models tests:
+* Exact limit prices and quantity reaching zero after a fill.
+* All four peg combinations waiting without a reference.
+* Market orders having no price.
+* Invalid quantities and prices.
+* Inconsistent type-specific fields.
+* Immutable, individual trade records.
+
+
 
 ## Extras(if time allows):
 
