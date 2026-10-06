@@ -29,6 +29,17 @@ class BookSide:
             self._levels[price] = []
         self._levels[price].append(order)
 
+    def remove(self, order_id: str) -> Order:
+        """Remove an individual order, preserving the queue order."""
+        for price, queue in self._levels.items():
+            for index, order in enumerate(queue):
+                if order.id == order_id:
+                    queue.pop(index)
+                    if not queue:
+                        del self._levels[price]
+                    return order
+        raise ValueError(f"order {order_id!r} is not in this book side")
+
     def best(self) -> Order | None:
         if not self._levels:
             return None
