@@ -499,7 +499,7 @@ class PegPlacementTests(unittest.TestCase):
                 self.assertEqual(engine._orders[fixed.order_id].remaining_qty, 60)
 
     def test_resting_peg_cleanup_when_filled_and_manual_price_rejected(self):
-        self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        fixed = self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
         result = self.engine.submit_peg(Side.BUY, PegReference.BID, 50)
         peg = self.engine._pegs[result.order_id]
         priority = peg.priority_sequence
@@ -507,7 +507,9 @@ class PegPlacementTests(unittest.TestCase):
             self.engine.amend(result.order_id, price=Decimal("11"), quantity=80)
         self.assertEqual((peg.remaining_qty, peg.effective_price, peg.priority_sequence),
                          (50, Decimal("10"), priority))
-        self.engine.submit_market(Side.SELL, 150)
+        # Increasing the fixed order puts it behind the peg without changing price.
+        self.engine.amend(fixed.order_id, quantity=150)
+        self.engine.submit_market(Side.SELL, 200)
         self.assertEqual(self.engine._pegs, {})
         self.assertEqual(self.engine._orders, {})
 
@@ -520,6 +522,70 @@ class PegPlacementTests(unittest.TestCase):
             self.assertEqual(self.engine._pegs, {})
             self.assertEqual(self.engine._orders, {})
             self.assertEqual((self.engine._id_counter, self.engine._priority_counter), (0, 0))
+
+
+class PegRepricingTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = MatchingEngine()
+
+    def test_multiple_pegs_move_behind_new_fixed_order_in_previous_order(self):
+        old = self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        p = self.engine.submit_peg(Side.BUY, PegReference.BID, 50)
+        q = self.engine.submit_peg(Side.BUY, PegReference.BID, 60)
+        new = self.engine.submit_limit(Side.BUY, Decimal("11"), 100)
+        self.assertEqual([o.id for o in self.engine._buys.orders()],
+                         [new.order_id, p.order_id, q.order_id, old.order_id])
+        self.engine.cancel(new.order_id)
+        self.assertEqual([o.id for o in self.engine._buys.orders()],
+                         [old.order_id, p.order_id, q.order_id])
+        self.assertEqual(self.engine._pegs[p.order_id].effective_price, Decimal("10"))
+
+    def test_peg_waits_deactivates_and_reactivates(self):
+        p = self.engine.submit_peg(Side.SELL, PegReference.OFFER, 50)
+        fixed = self.engine.submit_limit(Side.SELL, Decimal("10"), 100)
+        self.assertEqual([o.id for o in self.engine._sells.orders()], [fixed.order_id, p.order_id])
+        self.engine.cancel(fixed.order_id)
+        self.assertIsNone(self.engine._pegs[p.order_id].effective_price)
+        self.assertEqual(self.engine._sells.orders(), [])
+        self.assertIn(p.order_id, self.engine._orders)
+        new = self.engine.submit_limit(Side.SELL, Decimal("11"), 100)
+        self.assertEqual([o.id for o in self.engine._sells.orders()], [new.order_id, p.order_id])
+        self.assertEqual(self.engine._pegs[p.order_id].effective_price, Decimal("11"))
+
+    def test_reference_updates_before_market_next_fill(self):
+        self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        p = self.engine.submit_peg(Side.BUY, PegReference.BID, 100)
+        lower = self.engine.submit_limit(Side.BUY, Decimal("9"), 100)
+        result = self.engine.submit_market(Side.SELL, 150)
+        self.assertEqual([(t.price, t.quantity) for t in result.trades],
+                         [(Decimal("10"), 100), (Decimal("9"), 50)])
+        self.assertEqual(result.trades[1].buy_order_id, lower.order_id)
+        self.assertEqual(self.engine._pegs[p.order_id].effective_price, Decimal("9"))
+
+    def test_incoming_opposite_peg_follows_each_reference_and_waits_with_remainder(self):
+        self.engine.submit_limit(Side.SELL, Decimal("10"), 100)
+        self.engine.submit_limit(Side.SELL, Decimal("11"), 100)
+        result = self.engine.submit_peg(Side.BUY, PegReference.OFFER, 250)
+        self.assertEqual([(t.price, t.quantity) for t in result.trades],
+                         [(Decimal("10"), 100), (Decimal("11"), 100)])
+        self.assertEqual(self.engine._pegs[result.order_id].remaining_qty, 50)
+        self.assertIsNone(self.engine._pegs[result.order_id].effective_price)
+        self.assertEqual(self.engine._buys.orders(), [])
+
+    def test_unchanged_reference_preserves_peg_priority_on_quantity_increase(self):
+        fixed = self.engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        p = self.engine.submit_peg(Side.BUY, PegReference.BID, 50)
+        sequence = self.engine._pegs[p.order_id].priority_sequence
+        self.engine.amend(fixed.order_id, quantity=150)
+        self.assertEqual(self.engine._pegs[p.order_id].priority_sequence, sequence)
+        self.assertEqual([o.id for o in self.engine._buys.orders()], [p.order_id, fixed.order_id])
+
+    def test_price_amendment_moves_peg_to_new_fixed_reference(self):
+        fixed = self.engine.submit_limit(Side.SELL, Decimal("11"), 100)
+        p = self.engine.submit_peg(Side.SELL, PegReference.OFFER, 50)
+        self.engine.amend(fixed.order_id, price=Decimal("10"))
+        self.assertEqual(self.engine._pegs[p.order_id].effective_price, Decimal("10"))
+        self.assertEqual([o.id for o in self.engine._sells.orders()], [fixed.order_id, p.order_id])
 
 
 if __name__ == "__main__":

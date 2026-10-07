@@ -61,6 +61,9 @@ class BookSide:
             self._prices.pop(index)
         return order
 
+    def contains(self, order_id: str) -> bool:
+        return order_id in self._locations
+
     def best(self) -> Order | None:
         if not self._prices:
             return None

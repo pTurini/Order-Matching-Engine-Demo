@@ -32,6 +32,7 @@ class MatchingEngine:
         self._trades: list[Trade] = []
         self._orders: dict[str, Order] = {}
         self._pegs: dict[str, Order] = {}
+        self._incoming_id: str | None = None
 
     @property
     def trade_history(self) -> tuple[Trade, ...]:
@@ -49,8 +50,6 @@ class MatchingEngine:
     def submit_peg(self, side: Side, reference: PegReference, quantity: int) -> CommandResult:
         order = self._create_order(side, OrderKind.PEGGED, quantity,
                                    peg_reference=reference)
-        reference_book = self._buys if reference is PegReference.BID else self._sells
-        order.effective_price = reference_book.fixed_reference()
         self._pegs[order.id] = order
         return self._submit(order)
 
@@ -60,6 +59,7 @@ class MatchingEngine:
             book = self._buys if order.side is Side.BUY else self._sells
             book.remove(order.id)
         self._forget(order)
+        self._refresh_pegs()
         return CommandResult(order.id)
 
     def amend(self, order_id: str, *, quantity: int | None = None,
@@ -81,6 +81,7 @@ class MatchingEngine:
         if not price_changed and new_qty <= order.remaining_qty:
             # Reductions and no-ops leave the order at its existing queue position.
             order.remaining_qty = new_qty
+            self._refresh_pegs()
             return CommandResult(order.id)
 
         book = self._buys if order.side is Side.BUY else self._sells
@@ -99,6 +100,7 @@ class MatchingEngine:
         # Quantity increase only: move to the back of the unchanged price queue.
         if order.effective_price is not None:
             book.add(order)
+        self._refresh_pegs()
         return CommandResult(order.id)
 
     def _require_order(self, order_id: str) -> Order:
@@ -116,9 +118,13 @@ class MatchingEngine:
     def _submit(self, order: Order) -> CommandResult:
         start = len(self._trades)
         self._orders[order.id] = order
+        self._incoming_id = order.id
+        self._refresh_pegs()
         self._match(order)
         discarded = order.remaining_qty if order.kind is OrderKind.MARKET else 0
         self._finish_incoming(order)
+        self._incoming_id = None
+        self._refresh_pegs()
         return CommandResult(order.id, tuple(self._trades[start:]), discarded)
 
     def _finish_incoming(self, order: Order) -> None:
@@ -184,3 +190,33 @@ class MatchingEngine:
             if resting.remaining_qty == 0:
                 opposite_book.remove(resting.id) # deletes resting order if exhausted
                 self._forget(resting)
+            if incoming.remaining_qty == 0:
+                self._forget(incoming)
+            self._refresh_pegs()
+
+    def _refresh_pegs(self) -> None:
+        """Move changed pegs as a batch, preserving their previous relative order."""
+        references = {
+            PegReference.BID: self._buys.fixed_reference(),
+            PegReference.OFFER: self._sells.fixed_reference(),
+        }
+        pegs = sorted(self._pegs.values(), key=lambda order: order.priority_sequence) # preserves previous order
+        changes = []
+        # First remove all changed pegs, using the same fixed-reference snapshot.
+        for order in pegs:
+            price = references[order.peg_reference]
+            if price == order.effective_price:
+                continue
+            book = self._buys if order.side is Side.BUY else self._sells
+            if book.contains(order.id):
+                book.remove(order.id)
+            changes.append((order, price))
+
+        # Then append at the new prices, in their old relative priority order.
+        for order, price in changes:
+            order.effective_price = price
+            self._priority_counter += 1
+            order.priority_sequence = self._priority_counter
+            if price is not None and order.id != self._incoming_id:
+                book = self._buys if order.side is Side.BUY else self._sells
+                book.add(order)
