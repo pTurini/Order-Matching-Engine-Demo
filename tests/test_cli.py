@@ -79,6 +79,33 @@ class CommandTests(unittest.TestCase):
                      self.engine.trade_history, self.engine._id_counter, self.engine._priority_counter)
             self.assertEqual(after, before)
 
+    def test_show_and_debug_preserve_exact_prices_remaining_quantity_and_fifo(self):
+        execute_command(self.engine, "limit buy 10.001 100")
+        execute_command(self.engine, "limit buy 10.001 50")
+        execute_command(self.engine, "market sell 40")
+        execute_command(self.engine, "peg offer sell 25")
+        before = (self.engine.debug_snapshot(), self.engine.inactive_pegs(),
+                  self.engine.trade_history, self.engine._priority_counter)
+        self.assertEqual(execute_command(self.engine, "show order 1"),
+                         "ID: 1, side: buy, kind: limit, remaining qty: 60, "
+                         "price: 10.001, priority: 1")
+        debug = execute_command(self.engine, "print debug")
+        self.assertLess(debug.index("ID: 1,"), debug.index("ID: 2,"))
+        self.assertIn("Inactive pegs (priority order):\nID: 4,", debug)
+        self.assertIn("price: inactive", debug)
+        self.assertIn("reference: offer", debug)
+        after = (self.engine.debug_snapshot(), self.engine.inactive_pegs(),
+                 self.engine.trade_history, self.engine._priority_counter)
+        self.assertEqual(before, after)
+
+    def test_empty_debug_and_invalid_inspection_commands(self):
+        self.assertEqual(execute_command(self.engine, "print debug").count("(none)"), 3)
+        for command in ("show order", "show 1", "show order 1 extra",
+                        "show order missing", "print debug extra"):
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                execute_command(self.engine, command)
+        self.assertEqual(self.engine.book_snapshot(), {Side.BUY: (), Side.SELL: ()})
+
     def test_invalid_commands_leave_engine_state_unchanged(self):
         execute_command(self.engine, "limit sell 10 100")
         before = (self.engine.debug_snapshot(), self.engine.trade_history,

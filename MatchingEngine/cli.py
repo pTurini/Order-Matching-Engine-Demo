@@ -2,7 +2,7 @@
 
 from decimal import Decimal, InvalidOperation
 
-from .display import format_book, format_trades
+from .display import format_book, format_debug_book, format_order, format_trades
 from .engine import MatchingEngine
 from .models import PegReference, Side
 
@@ -26,6 +26,12 @@ def execute_command(engine: MatchingEngine, line: str) -> str:
 
     if parts == ["print", "book"]:
         return format_book(engine.book_snapshot())
+    if parts == ["print", "debug"]:
+        return format_debug_book(engine.debug_snapshot(), engine.inactive_pegs())
+    if parts[0] == "show":
+        if len(parts) != 3 or parts[1] != "order":
+            raise ValueError("usage: show order <id>")
+        return format_order(engine.get_order(parts[2]))
 
     if parts[0] == "limit":
         if len(parts) != 4:
@@ -71,7 +77,8 @@ def execute_command(engine: MatchingEngine, line: str) -> str:
         result = engine.amend(parts[2], **changes)
         confirmation = f"Order amended: {result.order_id}"
     else:
-        raise ValueError("unknown command; supported: limit, market, peg, cancel, amend, print book")
+        raise ValueError("unknown command; supported: limit, market, peg, cancel, amend, "
+                         "print book, print debug, show order")
 
     lines = [confirmation]
     trades = format_trades(result.aggregated_trades())
