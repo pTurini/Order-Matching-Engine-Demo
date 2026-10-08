@@ -1,6 +1,7 @@
 """Command parsing and interactive terminal interface."""
 
 from decimal import Decimal, InvalidOperation
+import sys
 
 from .display import format_book, format_debug_book, format_order, format_trades
 from .engine import MatchingEngine
@@ -108,22 +109,38 @@ def execute_command(engine: MatchingEngine, line: str) -> str:
     return "\n".join(lines)
 
 
+def _render_screen(engine: MatchingEngine, command: str, output: str) -> None:
+    """Redraw the book above the latest response, clearing only real terminals."""
+    if sys.stdout.isatty():
+        # Clear the visible screen and move the cursor to the top-left corner.
+        print("\033[2J\033[H", end="")
+    print(format_book(engine.book_snapshot()))
+    print("\nMatching engine. Enter help for commands, or quit to exit.")
+    if command:
+        print(f"\nLast command: {command}")
+    if output:
+        print(output)
+    print(flush=True)
+
+
 def main() -> None:
-    """Keep one engine alive for the session; handle expected input errors only."""
+    """Keep one engine alive and display the updated book before every prompt."""
     engine = MatchingEngine()
-    print("Matching engine. Enter help for commands, or quit to exit.")
+    last_command = ""
+    last_output = ""
     try:
         while True:
+            _render_screen(engine, last_command, last_output)
             line = input(">>> ")
             if line.split() == ["quit"]:
                 break
-            try:
-                output = execute_command(engine, line)
-            except ValueError as error:
-                print(f"Error: {error}")
+            if not line.strip():
                 continue
-            if output:
-                print(output)
+            last_command = line.strip()
+            try:
+                last_output = execute_command(engine, line)
+            except ValueError as error:
+                last_output = f"Error: {error}"
     except (EOFError, KeyboardInterrupt):
         print()
     print("Closing book engine.")

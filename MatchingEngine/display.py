@@ -50,11 +50,14 @@ def format_debug_book(snapshot: dict[Side, tuple[Order, ...]],
     lines = []
     for side, heading in ((Side.BUY, "Buy orders (price/FIFO order):"),
                           (Side.SELL, "Sell orders (price/FIFO order):")):
+        if lines:
+            lines.append("\n" + "=" * 60 + "\n")
         lines.append(heading)
         if snapshot[side]:
             lines.extend(format_order(order) for order in snapshot[side])
         else:
             lines.append("(none)")
+    lines.append("\n" + "=" * 60 + "\n")
     lines.append("Inactive pegs (priority order):")
     if inactive_pegs:
         lines.extend(format_order(order) for order in inactive_pegs)

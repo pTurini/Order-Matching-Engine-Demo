@@ -140,13 +140,13 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("Trade, price: 10.00, qty: 40", output)
         self.assertIn("remaining qty: 60", output)
         self.assertIn("60 @ 10.00", output)
-        self.assertTrue(output.endswith("Goodbye.\n"))
+        self.assertTrue(output.endswith("Closing book engine.\n"))
 
     def test_eof_and_keyboard_interrupt_exit_cleanly(self):
         for ending in (EOFError(), KeyboardInterrupt()):
             with self.subTest(ending=type(ending).__name__):
                 output = self.run_session(["", ending])
-                self.assertTrue(output.endswith("Goodbye.\n"))
+                self.assertTrue(output.endswith("Closing book engine.\n"))
                 self.assertNotIn("Error:", output)
 
     def test_help_and_quit_require_exact_syntax(self):
@@ -160,6 +160,29 @@ class InteractiveTests(unittest.TestCase):
                 redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(RuntimeError, "bug"):
                 main()
+
+    def test_book_is_redrawn_above_latest_command_and_error(self):
+        output = self.run_session(["limit sell 10 100", "market buy 40", "market buy bad", "quit"])
+        frames = output.split("Buy orders")
+        self.assertEqual(len(frames), 5)  # Initial frame and one after each command.
+        self.assertIn("(empty book)", frames[1])
+        self.assertLess(frames[2].index("100 @ 10.00"), frames[2].index("Last command:"))
+        self.assertLess(frames[3].index("60 @ 10.00"), frames[3].index("Trade, price:"))
+        self.assertIn("60 @ 10.00", frames[4])
+        self.assertIn("Last command: market buy bad", frames[4])
+        self.assertIn("Error:", frames[4])
+        self.assertNotIn("Trade, price:", frames[4])
+
+    def test_screen_clears_only_when_output_is_a_terminal(self):
+        with patch("MatchingEngine.cli.sys.stdout.isatty", return_value=True):
+            # redirect_stdout substitutes stdout, so patch the substituted stream.
+            output = io.StringIO()
+            with patch.object(output, "isatty", return_value=True), \
+                    patch("builtins.input", side_effect=["quit"]), redirect_stdout(output):
+                main()
+            self.assertTrue(output.getvalue().startswith("\033[2J\033[H"))
+        plain = self.run_session(["quit"])
+        self.assertNotIn("\033", plain)
 
 
 if __name__ == "__main__":
