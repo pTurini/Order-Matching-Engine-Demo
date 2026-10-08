@@ -88,3 +88,12 @@ class BookSide:
         for price in prices:
             result.extend(self._levels[price].values())
         return result
+
+    def levels(self) -> tuple[tuple[Decimal, int], ...]:
+        """Aggregate remaining quantity by exact price, best price first."""
+        prices = reversed(self._prices) if self.side is Side.BUY else self._prices
+        result = []
+        for price in prices:
+            quantity = sum(order.remaining_qty for order in self._levels[price].values())
+            result.append((price, quantity))
+        return tuple(result)
