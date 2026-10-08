@@ -4,11 +4,12 @@ In this document, I will explain my methodology to solve this problem, as well a
 
 ## Architecture:
 
-The architecture is divided in 4 mains components:
+The architecture is divided in 5 main components:
 1. Models: contains the classes' structure and validation for all the corresponding data types (order, trade).
 2. Book: stores the market orders in the correct order.
 3. Engine: contains the logic of the system and the operations that must be done, given a book.
-4. CLI: provides interface for the user.
+4. CLI: provides interface for the user, and sends the valid commands to the engine.
+5. Display: provides functions returning normal/debug book, individual order, and trade text to be fed to the CLI.
 
 ## Models:
 
@@ -24,6 +25,10 @@ The architecture is divided in 4 mains components:
 | `peg_reference` | Bid or offer for a pegged order |
 | `effective_price` | Current book price; absent for an inactive peg |
 | `priority_sequence` | Increasing number identifying its latest queue position |
+
+
+
+## Book:
 
 
 ## Engine:
@@ -75,6 +80,10 @@ After matching:
 * Price precision is exact, but interface shows fixed at 0.01 precision.
 * Order IDs are unique and never reused within a single session.
 * For debugging: show individual orders, remaining quantities, IDs, priority order.
+
+### Optimization features:
+I made some optimizations to make the code run faster, mostly related to lookups. This allows the engine to run faster but has a memory drawback, with the use of extra dictionaries and arrays. This system is rather light-weight, so I assume it should not make a significant difference. However, I think it is nice to have and makes the system more scalable.
+
 
 ## CLI:
 
