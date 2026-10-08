@@ -1,7 +1,10 @@
+import io
 import unittest
+from contextlib import redirect_stdout
+from unittest.mock import patch
 from decimal import Decimal
 
-from MatchingEngine.cli import execute_command
+from MatchingEngine.cli import execute_command, main
 from MatchingEngine.display import format_trades
 from MatchingEngine.engine import MatchingEngine
 from MatchingEngine.models import Side
@@ -119,6 +122,44 @@ class CommandTests(unittest.TestCase):
             after = (self.engine.debug_snapshot(), self.engine.trade_history,
                      self.engine._id_counter, self.engine._priority_counter)
             self.assertEqual(after, before)
+
+
+class InteractiveTests(unittest.TestCase):
+    def run_session(self, commands):
+        output = io.StringIO()
+        with patch("builtins.input", side_effect=commands), redirect_stdout(output):
+            main()
+        return output.getvalue()
+
+    def test_session_reuses_engine_recovers_from_error_and_quits(self):
+        output = self.run_session(["help", "limit sell 10 100", "market buy bad",
+                                   "market buy 40", "show order 1", "print book", "quit"])
+        self.assertIn("Commands:", output)
+        self.assertIn("Error:", output)
+        self.assertIn("Order created: 2", output)
+        self.assertIn("Trade, price: 10.00, qty: 40", output)
+        self.assertIn("remaining qty: 60", output)
+        self.assertIn("60 @ 10.00", output)
+        self.assertTrue(output.endswith("Goodbye.\n"))
+
+    def test_eof_and_keyboard_interrupt_exit_cleanly(self):
+        for ending in (EOFError(), KeyboardInterrupt()):
+            with self.subTest(ending=type(ending).__name__):
+                output = self.run_session(["", ending])
+                self.assertTrue(output.endswith("Goodbye.\n"))
+                self.assertNotIn("Error:", output)
+
+    def test_help_and_quit_require_exact_syntax(self):
+        output = self.run_session(["quit extra", "help extra", "quit"])
+        self.assertEqual(output.count("Error:"), 2)
+        self.assertIn("Commands:", execute_command(MatchingEngine(), "help"))
+
+    def test_unexpected_programming_errors_are_not_hidden(self):
+        with patch("builtins.input", return_value="print book"), \
+                patch("MatchingEngine.cli.execute_command", side_effect=RuntimeError("bug")), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "bug"):
+                main()
 
 
 if __name__ == "__main__":
