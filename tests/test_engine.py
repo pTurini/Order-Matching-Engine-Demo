@@ -708,5 +708,158 @@ class PegSettlementTests(unittest.TestCase):
                 self.assertEqual(book.contains(peg.id), peg.effective_price is not None)
 
 
+class RequirementsAuditTests(unittest.TestCase):
+    def test_active_pegged_quantity_amendments_preserve_or_lose_fifo(self):
+        for side, reference in ((Side.BUY, PegReference.BID),
+                                (Side.SELL, PegReference.OFFER)):
+            with self.subTest(side=side):
+                engine = MatchingEngine()
+                fixed = engine.submit_limit(side, Decimal("10"), 100)
+                p = engine.submit_peg(side, reference, 100)
+                q = engine.submit_peg(side, reference, 100)
+                book = engine._buys if side is Side.BUY else engine._sells
+                priority = engine._pegs[p.order_id].priority_sequence
+                engine.amend(p.order_id, quantity=50)
+                engine.amend(p.order_id, quantity=50)
+                self.assertEqual(engine._pegs[p.order_id].priority_sequence, priority)
+                self.assertEqual([o.id for o in book.orders()],
+                                 [fixed.order_id, p.order_id, q.order_id])
+                engine.amend(p.order_id, quantity=150)
+                self.assertEqual([o.id for o in book.orders()],
+                                 [fixed.order_id, q.order_id, p.order_id])
+                self.assertGreater(engine._pegs[p.order_id].priority_sequence,
+                                   engine._pegs[q.order_id].priority_sequence)
+                before = [(o.id, o.remaining_qty, o.priority_sequence) for o in book.orders()]
+                with self.assertRaises(ValueError):
+                    engine.amend(p.order_id, quantity=0)
+                self.assertEqual(before, [(o.id, o.remaining_qty, o.priority_sequence)
+                                          for o in book.orders()])
+
+    def test_sell_bid_peg_sweeps_changing_references_and_retains_remainder(self):
+        engine = MatchingEngine()
+        engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        engine.submit_limit(Side.BUY, Decimal("9"), 100)
+        result = engine.submit_peg(Side.SELL, PegReference.BID, 250)
+        self.assertEqual([(t.price, t.quantity) for t in result.trades],
+                         [(Decimal("10"), 100), (Decimal("9"), 100)])
+        self.assertEqual(engine._pegs[result.order_id].remaining_qty, 50)
+        self.assertIsNone(engine._pegs[result.order_id].effective_price)
+        self.assertEqual(result.discarded_qty, 0)
+        next_bid = engine.submit_limit(Side.BUY, Decimal("8"), 50)
+        self.assertEqual(next_bid.trades[0].sell_order_id, result.order_id)
+        self.assertNotIn(result.order_id, engine._pegs)
+
+    def test_repricing_uses_current_queue_order_after_peg_quantity_increase(self):
+        engine = MatchingEngine()
+        old = engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        p = engine.submit_peg(Side.BUY, PegReference.BID, 50)
+        q = engine.submit_peg(Side.BUY, PegReference.BID, 50)
+        engine.amend(p.order_id, quantity=100)  # q now precedes p.
+        new = engine.submit_limit(Side.BUY, Decimal("11"), 100)
+        self.assertEqual([o.id for o in engine._buys.orders()],
+                         [new.order_id, q.order_id, p.order_id, old.order_id])
+
+
+class InspectionTests(unittest.TestCase):
+    def test_order_inspection_returns_copy_that_cannot_change_live_state(self):
+        engine = MatchingEngine()
+        result = engine.submit_limit(Side.BUY, Decimal("10.005"), 100)
+        copy = engine.get_order(result.order_id)
+        self.assertIsNot(copy, engine._orders[result.order_id])
+        self.assertEqual(copy, engine._orders[result.order_id])
+        copy.remaining_qty = 999
+        copy.effective_price = Decimal("20")
+        copy.priority_sequence = 999
+        copy.id = "changed"
+        live = engine.get_order(result.order_id)
+        self.assertEqual((live.id, live.remaining_qty, live.effective_price,
+                          live.priority_sequence), (result.order_id, 100, Decimal("10.005"), 1))
+        trade = engine.submit_market(Side.SELL, 150)
+        self.assertEqual((trade.trades[0].price, trade.trades[0].quantity),
+                         (Decimal("10.005"), 100))
+        self.assertEqual(trade.discarded_qty, 50)
+
+    def test_inspected_copy_is_a_snapshot_and_inactive_pegs_are_accessible(self):
+        engine = MatchingEngine()
+        result = engine.submit_peg(Side.BUY, PegReference.BID, 100)
+        copy = engine.get_order(result.order_id)
+        self.assertIsNone(copy.effective_price)
+        engine.amend(result.order_id, quantity=50)
+        self.assertEqual(copy.remaining_qty, 100)
+        self.assertEqual(engine.get_order(result.order_id).remaining_qty, 50)
+        copy.peg_reference = PegReference.OFFER
+        self.assertIs(engine.get_order(result.order_id).peg_reference, PegReference.BID)
+
+    def test_unknown_invalid_cancelled_and_completed_orders_cannot_be_inspected(self):
+        engine = MatchingEngine()
+        cancelled = engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        engine.cancel(cancelled.order_id)
+        filled = engine.submit_limit(Side.SELL, Decimal("11"), 100)
+        market = engine.submit_market(Side.BUY, 100)
+        for order_id in ("missing", "", None, [], cancelled.order_id,
+                         filled.order_id, market.order_id):
+            with self.subTest(order_id=order_id), self.assertRaises(ValueError):
+                engine.get_order(order_id)
+        self.assertEqual(engine._orders, {})
+        self.assertEqual(len(engine.trade_history), 1)
+
+
+class BookSnapshotTests(unittest.TestCase):
+    def test_aggregated_snapshot_uses_remaining_quantity_exact_prices_and_best_order(self):
+        engine = MatchingEngine()
+        engine.submit_limit(Side.BUY, Decimal("9"), 100)
+        engine.submit_limit(Side.BUY, Decimal("10.001"), 100)
+        engine.submit_limit(Side.BUY, Decimal("10.001"), 50)
+        engine.submit_limit(Side.BUY, Decimal("10.002"), 20)
+        engine.submit_limit(Side.SELL, Decimal("12"), 40)
+        engine.submit_limit(Side.SELL, Decimal("11"), 30)
+        engine.submit_market(Side.SELL, 25)
+        snapshot = engine.book_snapshot()
+        self.assertEqual(snapshot, {
+            Side.BUY: ((Decimal("10.001"), 145), (Decimal("9"), 100)),
+            Side.SELL: ((Decimal("11"), 30), (Decimal("12"), 40)),
+        })
+        snapshot[Side.BUY] = ()
+        self.assertEqual(engine.book_snapshot()[Side.BUY][0], (Decimal("10.001"), 145))
+
+    def test_debug_snapshot_preserves_fifo_and_copies_live_orders(self):
+        engine = MatchingEngine()
+        first = engine.submit_limit(Side.BUY, Decimal("10"), 100)
+        second = engine.submit_peg(Side.BUY, PegReference.BID, 50)
+        snapshot = engine.debug_snapshot()
+        self.assertEqual([order.id for order in snapshot[Side.BUY]],
+                         [first.order_id, second.order_id])
+        snapshot[Side.BUY][0].remaining_qty = 999
+        snapshot[Side.BUY][1].effective_price = Decimal("99")
+        snapshot[Side.SELL] = ()
+        self.assertEqual(engine.get_order(first.order_id).remaining_qty, 100)
+        self.assertEqual(engine.get_order(second.order_id).effective_price, Decimal("10"))
+
+    def test_inactive_pegs_are_separate_detached_and_ordered(self):
+        engine = MatchingEngine()
+        p = engine.submit_peg(Side.BUY, PegReference.BID, 100)
+        q = engine.submit_peg(Side.SELL, PegReference.OFFER, 50)
+        engine.amend(p.order_id, quantity=150)
+        snapshot = engine.inactive_pegs()
+        self.assertEqual([order.id for order in snapshot], [q.order_id, p.order_id])
+        self.assertEqual(engine.book_snapshot(), {Side.BUY: (), Side.SELL: ()})
+        self.assertEqual(engine.debug_snapshot(), {Side.BUY: (), Side.SELL: ()})
+        snapshot[0].remaining_qty = 999
+        self.assertEqual(engine.get_order(q.order_id).remaining_qty, 50)
+        engine.cancel(q.order_id)
+        self.assertEqual(len(snapshot), 2)  # Previous snapshots do not update.
+        self.assertEqual([order.id for order in engine.inactive_pegs()], [p.order_id])
+
+    def test_snapshots_do_not_change_after_later_execution(self):
+        engine = MatchingEngine()
+        engine.submit_limit(Side.SELL, Decimal("10"), 100)
+        levels = engine.book_snapshot()
+        orders = engine.debug_snapshot()
+        engine.submit_market(Side.BUY, 40)
+        self.assertEqual(levels[Side.SELL], ((Decimal("10"), 100),))
+        self.assertEqual(orders[Side.SELL][0].remaining_qty, 100)
+        self.assertEqual(engine.book_snapshot()[Side.SELL], ((Decimal("10"), 60),))
+
+
 if __name__ == "__main__":
     unittest.main()
