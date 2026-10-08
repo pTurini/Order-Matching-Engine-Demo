@@ -25,6 +25,7 @@ The architecture is divided in 4 mains components:
 | `effective_price` | Current book price; absent for an inactive peg |
 | `priority_sequence` | Increasing number identifying its latest queue position |
 
+
 ## Engine:
 
 ### Logic:
@@ -79,8 +80,24 @@ After matching:
 
 The CLI reads and validates commands inputs from the user, sends to the engine to be executed (if valid), displays the results, and reads the next command.
 ### Commands:
+The available commands are listed below:
 
+| Command | Description |
+|---|---|
+| `limit <buy\|sell> <price> <quantity>` | Submit a limit order. |
+| `market <buy\|sell> <quantity>` | Submit a market order. |
+| `peg <bid\|offer> <buy\|sell> <quantity>` | Submit an order pegged to the fixed bid or offer. |
+| `cancel order <id>` | Cancel an outstanding order. |
+| `amend order <id> qty <quantity>` | Change the remaining quantity. |
+| `amend order <id> price <price>` | Change a fixed limit order’s price. |
+| `amend order <id> price <price> qty <quantity>` | Change price and remaining quantity; fields may appear in either order. |
+| `print book` | Display quantities aggregated by exact price. |
+| `print debug` | Display individual orders, priority, exact prices, and inactive pegs. |
+| `show order <id>` | Display one outstanding order’s details. |
+| `help` | Display command syntax. |
+| `quit` | Exit the program. |
 
+Commands are lowercase. Quantities are positive integers and amendments refer to remaining quantity. Prices are exact internally, but normal output displays two decimal places.
 
 
 ## Tests:
