@@ -1,6 +1,6 @@
 """Matching engine, built incrementally: storage and order creation first."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from .book import BookSide
@@ -38,6 +38,26 @@ class MatchingEngine:
     def trade_history(self) -> tuple[Trade, ...]:
         """Expose execution history without allowing callers to change the list."""
         return tuple(self._trades)
+
+    def get_order(self, order_id: str) -> Order:
+        """Return a detached copy of an outstanding order, including inactive pegs."""
+        return replace(self._require_order(order_id))
+
+    def book_snapshot(self) -> dict[Side, tuple[tuple[Decimal, int], ...]]:
+        """Return aggregated price levels without exposing live orders."""
+        return {Side.BUY: self._buys.levels(), Side.SELL: self._sells.levels()}
+
+    def debug_snapshot(self) -> dict[Side, tuple[Order, ...]]:
+        """Return detached order copies in price/FIFO order, excluding inactive pegs."""
+        return {
+            Side.BUY: tuple(replace(order) for order in self._buys.orders()),
+            Side.SELL: tuple(replace(order) for order in self._sells.orders()),
+        }
+
+    def inactive_pegs(self) -> tuple[Order, ...]:
+        """Return detached waiting pegs, oldest priority sequence first."""
+        pegs = sorted(self._pegs.values(), key=lambda order: order.priority_sequence)
+        return tuple(replace(order) for order in pegs if order.effective_price is None)
 
     def submit_limit(self, side: Side, price: Decimal, quantity: int) -> CommandResult:
         order = self._create_order(side, OrderKind.LIMIT, quantity, limit_price=price)
