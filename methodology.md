@@ -10,10 +10,7 @@ The architecture is divided in 4 mains components:
 3. Engine: contains the logic of the system and the operations that must be done, given a book.
 4. CLI: provides interface for the user.
 
-### Functions:
-Create, match, amend, or cancel orders.
-Update quantities and remove completed orders.
-Update affected pegged orders.
+## Models:
 
 
 ### Order structure:
@@ -28,7 +25,7 @@ Update affected pegged orders.
 | `effective_price` | Current book price; absent for an inactive peg |
 | `priority_sequence` | Increasing number identifying its latest queue position |
 
-## Assumptions:
+## Engine:
 
 ### Logic:
 * When limit orders cross, the trade is executed at the resting order's price.
@@ -46,7 +43,6 @@ Update affected pegged orders.
 * If a peg's updated price crosses, it is executed.
 * Pegged order's quantity can be amended, following the same rules as a normal order (decrease keeps priority, increase loses).
 * Pegs support buy-to-bid, sell-to-offer, buy-to-offer, sell-to-bid.
-
 
 ### Order logic:
 For one incoming order:
@@ -70,17 +66,25 @@ After matching:
 - A market remainder is discarded.
 - A peg remainder rests at its reference price or becomes inactive if no reference exists.
 
-### Interface and general rules:
+### Design decisions and invalid values:
 * On the interface, orders with same price are combined. But internally they have their own IDs and are treated separately.
 * Invalid input rejects, gives error message and does nothing to the book.
-* Quantity is an integer. No fractional shares.\
+* Quantity is an integer. No fractional shares.
 * Price must be positive and greater than zero.
 * Price precision is exact, but interface shows fixed at 0.01 precision.
-* Order IDs are unique and never reused.
+* Order IDs are unique and never reused within a single session.
 * For debugging: show individual orders, remaining quantities, IDs, priority order.
 
+## CLI:
+
+The CLI reads and validates commands inputs from the user, sends to the engine to be executed (if valid), displays the results, and reads the next command.
+### Commands:
+
+
+
+
 ## Tests:
-Test ideas:
+
 * Best-price matching and FIFO.
 * Partial fills and market remainder disposal.
 * Crossing limits with resting-price execution.
