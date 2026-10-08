@@ -1,3 +1,4 @@
+import random
 import unittest
 from decimal import Decimal
 
@@ -586,6 +587,125 @@ class PegRepricingTests(unittest.TestCase):
         self.engine.amend(fixed.order_id, price=Decimal("10"))
         self.assertEqual(self.engine._pegs[p.order_id].effective_price, Decimal("10"))
         self.assertEqual([o.id for o in self.engine._sells.orders()], [fixed.order_id, p.order_id])
+
+
+class PegSettlementTests(unittest.TestCase):
+    def test_waiting_buy_offer_executes_when_fixed_offer_appears(self):
+        engine = MatchingEngine()
+        peg = engine.submit_peg(Side.BUY, PegReference.OFFER, 150)
+        result = engine.submit_limit(Side.SELL, Decimal("10.50"), 100)
+        self.assertEqual([(t.buy_order_id, t.sell_order_id, t.price, t.quantity)
+                          for t in result.trades],
+                         [(peg.order_id, result.order_id, Decimal("10.50"), 100)])
+        self.assertEqual(engine._pegs[peg.order_id].remaining_qty, 50)
+        self.assertIsNone(engine._pegs[peg.order_id].effective_price)
+        self.assertEqual(engine._buys.orders(), [])
+        self.assertEqual(engine._sells.orders(), [])
+        self.assertIsNone(engine._incoming_id)
+
+    def test_multiple_waiting_pegs_execute_fifo_on_both_sides(self):
+        for side, ref, opposite in ((Side.BUY, PegReference.OFFER, Side.SELL),
+                                    (Side.SELL, PegReference.BID, Side.BUY)):
+            with self.subTest(side=side):
+                engine = MatchingEngine()
+                p = engine.submit_peg(side, ref, 100)
+                q = engine.submit_peg(side, ref, 100)
+                result = engine.submit_limit(opposite, Decimal("10"), 150)
+                ids = [t.buy_order_id if side is Side.BUY else t.sell_order_id
+                       for t in result.trades]
+                self.assertEqual(ids, [p.order_id, q.order_id])
+                self.assertEqual([t.quantity for t in result.trades], [100, 50])
+                self.assertEqual(result.aggregated_trades(), ((Decimal("10"), 150),))
+                self.assertNotIn(p.order_id, engine._orders)
+                self.assertEqual(engine._pegs[q.order_id].remaining_qty, 50)
+                self.assertIsNone(engine._pegs[q.order_id].effective_price)
+
+    def test_repeated_reference_activation_reports_new_trades_only(self):
+        engine = MatchingEngine()
+        fixed = engine.submit_limit(Side.SELL, Decimal("12"), 100)
+        engine.submit_limit(Side.BUY, Decimal("10"), 50)
+        peg = engine.submit_peg(Side.SELL, PegReference.BID, 100)
+        # Peg fills the fixed bid, then waits with 50. Amendment rests a new bid.
+        self.assertEqual(engine._pegs[peg.order_id].remaining_qty, 50)
+        new_buy = engine.submit_limit(Side.BUY, Decimal("9"), 20)
+        self.assertEqual(new_buy.trades[0].sell_order_id, peg.order_id)
+        # With offers removed, a new offer-pegged buyer waits for the next sell.
+        engine.cancel(fixed.order_id)
+        waiting = engine.submit_peg(Side.BUY, PegReference.OFFER, 40)
+        sell = engine.submit_limit(Side.SELL, Decimal("11"), 100)
+        self.assertEqual(sell.trades[0].buy_order_id, waiting.order_id)
+        amended = engine.amend(sell.order_id, price=Decimal("10"))
+        self.assertEqual(amended.trades, ())
+        self.assertEqual(engine._sells.best().effective_price, Decimal("10"))
+
+    def test_aggressive_incoming_peg_can_fill_resting_primary_peg(self):
+        engine = MatchingEngine()
+        fixed = engine.submit_limit(Side.SELL, Decimal("10"), 100)
+        primary = engine.submit_peg(Side.SELL, PegReference.OFFER, 50)
+        engine.amend(fixed.order_id, quantity=150)  # Primary now precedes fixed.
+        # Two opposing pegs participate when a new aggressive peg arrives.
+        aggressive = engine.submit_peg(Side.BUY, PegReference.OFFER, 70)
+        self.assertEqual([(t.sell_order_id, t.quantity) for t in aggressive.trades],
+                         [(primary.order_id, 50), (fixed.order_id, 20)])
+        self.assertEqual([t.price for t in aggressive.trades], [Decimal("10"), Decimal("10")])
+        self.assertNotIn(primary.order_id, engine._pegs)
+
+    def test_mixed_commands_leave_consistent_uncrossed_books_and_conserve_quantity(self):
+        rng = random.Random(42)
+        engine = MatchingEngine()
+        total = executed = discarded = cancelled = 0
+        for _ in range(400):
+            action = rng.randrange(5)
+            side = rng.choice(list(Side))
+            qty = rng.randrange(1, 30)
+            active = list(engine._orders)
+            if action < 3 or not active:
+                total += qty
+                if action == 0:
+                    result = engine.submit_market(side, qty)
+                elif action == 1:
+                    result = engine.submit_peg(side, rng.choice(list(PegReference)), qty)
+                else:
+                    result = engine.submit_limit(side, Decimal(rng.randrange(8, 14)), qty)
+            elif action == 3:
+                order_id = rng.choice(active)
+                cancelled += engine._orders[order_id].remaining_qty
+                result = engine.cancel(order_id)
+            else:
+                order_id = rng.choice(active)
+                order = engine._orders[order_id]
+                total += qty - order.remaining_qty
+                price = Decimal(rng.randrange(8, 14)) if order.kind is OrderKind.LIMIT else None
+                result = engine.amend(order_id, quantity=qty, price=price)
+            executed += 2 * sum(t.quantity for t in result.trades)
+            discarded += result.discarded_qty
+            remaining = sum(order.remaining_qty for order in engine._orders.values())
+            self.assertEqual(total, executed + discarded + cancelled + remaining)
+            self.assertEqual(sum(t.quantity for t in engine.trade_history) * 2, executed)
+            self.assertIsNone(engine._incoming_id)
+            buy, sell = engine._buys.best(), engine._sells.best()
+            if buy and sell:
+                self.assertLess(buy.effective_price, sell.effective_price)
+            for book in (engine._buys, engine._sells):
+                self.assertEqual(book._prices, sorted(book._levels))
+                for queue in book._levels.values():
+                    sequences = [o.priority_sequence for o in queue.values()]
+                    self.assertEqual(sequences, sorted(sequences))
+                    for order in queue.values():
+                        self.assertIs(engine._orders[order.id], order)
+                        self.assertGreater(order.remaining_qty, 0)
+                fixed_counts = {}
+                for order in book.orders():
+                    if order.kind is OrderKind.LIMIT:
+                        price = order.effective_price
+                        fixed_counts[price] = fixed_counts.get(price, 0) + 1
+                self.assertEqual(book._fixed_counts, fixed_counts)
+                self.assertEqual(book._fixed_prices, sorted(fixed_counts))
+            for peg in engine._pegs.values():
+                reference = engine._buys if peg.peg_reference is PegReference.BID else engine._sells
+                self.assertEqual(peg.effective_price, reference.fixed_reference())
+                book = engine._buys if peg.side is Side.BUY else engine._sells
+                self.assertEqual(book.contains(peg.id), peg.effective_price is not None)
 
 
 if __name__ == "__main__":

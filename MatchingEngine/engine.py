@@ -10,7 +10,7 @@ from .models import (Order, OrderKind, PegReference, Side, Trade,
 
 @dataclass(frozen=True)
 class CommandResult:
-    """Individual executions and discarded quantity from one submission."""
+    """Individual executions and discarded quantity caused by one command."""
 
     order_id: str
     trades: tuple[Trade, ...] = ()
@@ -55,12 +55,14 @@ class MatchingEngine:
 
     def cancel(self, order_id: str) -> CommandResult:
         order = self._require_order(order_id)
+        start = len(self._trades)
         if order.effective_price is not None:
             book = self._buys if order.side is Side.BUY else self._sells
             book.remove(order.id)
         self._forget(order)
         self._refresh_pegs()
-        return CommandResult(order.id)
+        self._settle_crossings()
+        return CommandResult(order.id, tuple(self._trades[start:]))
 
     def amend(self, order_id: str, *, quantity: int | None = None,
               price: Decimal | None = None) -> CommandResult:
@@ -78,11 +80,13 @@ class MatchingEngine:
         new_qty = order.remaining_qty if quantity is None else quantity
         new_price = order.limit_price if price is None else price
         price_changed = new_price != order.limit_price
+        start = len(self._trades)
         if not price_changed and new_qty <= order.remaining_qty:
             # Reductions and no-ops leave the order at its existing queue position.
             order.remaining_qty = new_qty
             self._refresh_pegs()
-            return CommandResult(order.id)
+            self._settle_crossings()
+            return CommandResult(order.id, tuple(self._trades[start:]))
 
         book = self._buys if order.side is Side.BUY else self._sells
         if order.effective_price is not None:
@@ -101,7 +105,8 @@ class MatchingEngine:
         if order.effective_price is not None:
             book.add(order)
         self._refresh_pegs()
-        return CommandResult(order.id)
+        self._settle_crossings()
+        return CommandResult(order.id, tuple(self._trades[start:]))
 
     def _require_order(self, order_id: str) -> Order:
         """Reject missing or invalid IDs before any state changes."""
@@ -125,6 +130,7 @@ class MatchingEngine:
         self._finish_incoming(order)
         self._incoming_id = None
         self._refresh_pegs()
+        self._settle_crossings()
         return CommandResult(order.id, tuple(self._trades[start:]), discarded)
 
     def _finish_incoming(self, order: Order) -> None:
@@ -220,3 +226,25 @@ class MatchingEngine:
             if price is not None and order.id != self._incoming_id:
                 book = self._buys if order.side is Side.BUY else self._sells
                 book.add(order)
+
+    def _settle_crossings(self) -> None:
+        """Give executable resting pegs matching turns until the book uncrosses."""
+        while True:
+            buy = self._buys.best()
+            sell = self._sells.best()
+            if buy is None or sell is None or buy.effective_price < sell.effective_price:
+                return
+
+            # A crossing left after an incoming turn must involve at least one peg.
+            pegs = [order for order in (buy, sell) if order.kind is OrderKind.PEGGED]
+            if not pegs:
+                raise RuntimeError("crossed fixed orders violate the engine invariant") # inconsistency
+            # One peg takes the incoming role; with two, choose the newer sequence.
+            incoming = max(pegs, key=lambda order: order.priority_sequence) # order by priority
+            book = self._buys if incoming.side is Side.BUY else self._sells
+            book.remove(incoming.id)
+            self._incoming_id = incoming.id
+            self._match(incoming)
+            self._finish_incoming(incoming)
+            self._incoming_id = None
+            self._refresh_pegs()
