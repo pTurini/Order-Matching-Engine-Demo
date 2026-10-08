@@ -4,8 +4,19 @@ from decimal import Decimal, InvalidOperation
 
 from .display import format_book, format_trades
 from .engine import MatchingEngine
-from .models import Side
+from .models import PegReference, Side
 
+
+def _parse_price(text: str) -> Decimal:
+    try:
+        return Decimal(text)
+    except InvalidOperation as error:
+        raise ValueError("price must be a decimal number") from error
+
+# Command examples:
+# limit buy 10 100
+# market sell 50
+# print book
 
 def execute_command(engine: MatchingEngine, line: str) -> str:
     """Parse. Expected input errors propagate to the caller."""
@@ -20,22 +31,49 @@ def execute_command(engine: MatchingEngine, line: str) -> str:
         if len(parts) != 4:
             raise ValueError("usage: limit <buy|sell> <price> <quantity>")
         side = Side(parts[1])
-        try:
-            price = Decimal(parts[2])
-        except InvalidOperation as error:
-            raise ValueError("price must be a decimal number") from error
+        price = _parse_price(parts[2])
         quantity = int(parts[3])
         result = engine.submit_limit(side, price, quantity)
+        confirmation = f"Order created: {result.order_id}"
     elif parts[0] == "market":
         if len(parts) != 3:
             raise ValueError("usage: market <buy|sell> <quantity>")
         side = Side(parts[1])
         quantity = int(parts[2])
         result = engine.submit_market(side, quantity)
+        confirmation = f"Order created: {result.order_id}"
+    elif parts[0] == "peg":
+        if len(parts) != 4:
+            raise ValueError("usage: peg <bid|offer> <buy|sell> <quantity>")
+        reference = PegReference(parts[1])
+        side = Side(parts[2])
+        quantity = int(parts[3])
+        result = engine.submit_peg(side, reference, quantity)
+        confirmation = f"Order created: {result.order_id}"
+    elif parts[0] == "cancel":
+        if len(parts) != 3 or parts[1] != "order":
+            raise ValueError("usage: cancel order <id>")
+        result = engine.cancel(parts[2])
+        confirmation = f"Order cancelled: {result.order_id}"
+    elif parts[0] == "amend":
+        if len(parts) not in (5, 7) or parts[1] != "order":
+            raise ValueError("usage: amend order <id> <qty|price> <value> [<price|qty> <value>]")
+        changes = {}
+        for index in range(3, len(parts), 2):
+            field = parts[index]
+            if field not in ("qty", "price"):
+                raise ValueError("amendment fields must be qty or price")
+            keyword = "quantity" if field == "qty" else "price"
+            if keyword in changes:
+                raise ValueError(f"duplicate amendment field: {field}")
+            value = parts[index + 1]
+            changes[keyword] = int(value) if field == "qty" else _parse_price(value)
+        result = engine.amend(parts[2], **changes)
+        confirmation = f"Order amended: {result.order_id}"
     else:
-        raise ValueError("unknown command; supported: limit, market, print book")
+        raise ValueError("unknown command; supported: limit, market, peg, cancel, amend, print book")
 
-    lines = [f"Order created: {result.order_id}"]
+    lines = [confirmation]
     trades = format_trades(result.aggregated_trades())
     if trades:
         lines.append(trades)
