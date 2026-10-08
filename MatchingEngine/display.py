@@ -25,3 +25,9 @@ def format_book(snapshot: dict[Side, tuple[tuple[Decimal, int], ...]]) -> str: #
         for buy, sell in zip_longest(buys, sells, fillvalue=""):
             lines.append(f"{buy:<{buy_width}} | {sell}".rstrip())
     return "\n".join(lines)
+
+
+def format_trades(trades: tuple[tuple[Decimal, int], ...]) -> str:
+    """Format already aggregated executions using the required output syntax."""
+    return "\n".join(f"Trade, price: {price:.2f}, qty: {quantity}"
+                     for price, quantity in trades)
