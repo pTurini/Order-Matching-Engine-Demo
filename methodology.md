@@ -40,12 +40,31 @@ The book stores queues and indexes to be used by the engine.
 | `_fixed_counts` | Price -> count of fixed limit orders | Track whether a price can be a peg reference |
 | `_fixed_prices` | Sorted prices containing fixed orders | Find the reference for pegged orders |
 
+The book also contains methods to `add` and `remove` orders from the book, as well as auxiliary methods to return the `best` price in the book for any given side, and to determine if the book `contains` an order of any given ID to be looked up.
+There are also methods for fetching the `fixed_reference` used by peg refreshing, and to return the `orders` and `levels` for taking snapshots in the display module.
 
 
 ### Optimization features:
 I made some optimizations to make the code run faster, mostly related to lookups. This allows the engine to run faster but has a memory drawback, with the use of extra dictionaries and arrays. This system is rather light-weight, so I assume it should not make a significant difference. However, I think it is nice to have and makes the system more scalable.
 
-`_locations`
+
+
+Initially, for `_levels`, each price held a list to preserve FIFO behavior. However, to cancel an order, that would need a search and subsequent shift in the array. So I implemented an `OrderedDict` keyed by ID. This protects insertion order (still FIFO), while allowing removal in O(1) time:
+```self._levels: dict[Decimal, OrderedDict[str, Order]] = {}```
+
+For finding an order's price, the `_locations` dictionary has the order ID as the key, and the price as its value. This is useful for removal. Previously, `remove` searched the price levels and their queues until it found the ID.
+Both of the aforementioned changes were necessary to avoid the search:
+```
+price = self._locations[order_id]
+order = self._levels[price].pop(order_id)
+```
+
+Also, `best` used the functions `max(self._levels)` for buy, and `min(self._levels)` for sell. These scan all L prices, so it was O(L). Instead, by using an ascending list, `_prices`, it is enough to index the last element `_prices[-1]` for the best buy, or the first, `_prices[0]` for the best sell.
+
+Adding separate counts and sorted prices was necessary to find fixed references. `_fixed_counts` stores the amount of remaining at each price level. It does not count, by definition, pegged orders. If the amount reaches zero, that price level is deleted.
+`_fixed_prices`, in turn, is a sorted list containing all available price levels (with count greater than 1, as stated above). The last element supplies the fixed bid, and the first supplies the fixed offer. This list excludes prices supported only by pegs.
+
+In short, `_levels` stores the orders. The other structures are indexes maintained alongside it. Their purpose is to answer common questions quickly. Every insertion and removal must keep those indexes consistent.
 
 ## Engine:
 
@@ -122,6 +141,9 @@ The available commands are listed below:
 | `quit` | Exit the program. |
 
 Commands are lowercase. Quantities are positive integers and amendments refer to remaining quantity. Prices are exact internally, but normal output displays two decimal places.
+
+## Display:
+
 
 
 ## Tests:
@@ -239,10 +261,8 @@ Testing was done for each model to check whether its behavior matched expectatio
 * Rounding is display only and does not merge exact levels.
 * Large values keep separator aligned.
 
-## Extras(if time allows):
+## Extras (if time allows):
 
 ### Market-making:
-
-
 
 ### Simulation:
