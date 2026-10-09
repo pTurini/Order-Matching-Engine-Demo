@@ -73,7 +73,7 @@ There are also methods for fetching the `fixed_reference` used by peg refreshing
 
 
 ### Optimization features:
-I made some optimizations to make the code run faster, mostly related to lookups. This allows the engine to run faster but has a memory drawback, with the use of extra dictionaries and arrays. This system is rather light-weight, so I assume it should not make a significant difference. However, I think it is nice to have and makes the system more scalable.
+I made some optimizations to make the code run faster, mostly related to lookups. This allows the engine to run better but has a memory drawback, with the use of extra dictionaries and arrays. This system is rather light-weight, so I assume it should not make a significant difference. However, I think it is nice to have and makes the system more scalable.
 
 
 
@@ -179,7 +179,8 @@ Testing was done for each model to check whether its behavior matched expectatio
 
 The engine required the most amount of testing, as it is the core of the system and incorporates all the logic and state transitions.
 
-### Models tests:
+<details>
+<summary><strong>Models tests (6)</strong></summary>
 
 * Limit preserves exact price and can be filled.
 * All peg combinations can wait without reference.
@@ -188,7 +189,10 @@ The engine required the most amount of testing, as it is the core of the system 
 * Inconsistent type specific fields are rejected.
 * Trade is an immutable individual execution.
 
-### Book tests:
+</details>
+
+<details>
+<summary><strong>Book tests (14)</strong></summary>
 
 * Buy price priority then FIFO.
 * Sell lowest price first and empty book.
@@ -205,7 +209,10 @@ The engine required the most amount of testing, as it is the core of the system 
 * All price index includes peg only levels.
 * Invalid insertions leave book unchanged.
 
-### Engine tests:
+</details>
+
+<details>
+<summary><strong>Engine tests (57)</strong></summary>
 
 * Engine starts with two empty books.
 * Creation assigns IDs and priority without submitting.
@@ -265,7 +272,10 @@ The engine required the most amount of testing, as it is the core of the system 
 * Inactive pegs are separate detached and ordered.
 * Snapshots do not change after later execution.
 
-### CLI tests:
+</details>
+
+<details>
+<summary><strong>CLI tests (16)</strong></summary>
 
 * Limit market and book share engine state.
 * Crossing limit and aggregated trade output.
@@ -284,12 +294,17 @@ The engine required the most amount of testing, as it is the core of the system 
 * Book is redrawn above latest command and error.
 * Screen clears only when output is a terminal.
 
-### Display tests:
+</details>
+
+<details>
+<summary><strong>Display tests (4)</strong></summary>
 
 * Two columns keep snapshot order and handle unequal lengths.
 * Empty and single sided books.
 * Rounding is display only and does not merge exact levels.
 * Large values keep separator aligned.
+
+</details>
 
 ## Extras (if time allows):
 
