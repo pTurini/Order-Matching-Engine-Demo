@@ -2,6 +2,7 @@
 
 In this document, I will explain my methodology to solve this problem, as well as the architectural decisions and other assumptions.
 
+
 ## Architecture:
 
 The architecture is divided in 5 main components:
@@ -11,8 +12,22 @@ The architecture is divided in 5 main components:
 4. CLI: provides interface for the user, and sends the valid commands to the engine.
 5. Display: provides functions returning normal/debug book, individual order, and trade text to be fed to the CLI.
 
+Essentially, this system can be thought as a synchronous state machine, in which the state transitions are implemented through methods. The state consists of outstanding orders (type, side, quantity, price and priority) and completed trades. The state changes are triggered through oder submission, amendment or cancellation.
+
+```mermaid
+flowchart LR
+    A[User command] --> B[CLI parses input]
+    B --> C[Engine applies trading rules]
+    C <--> D[Buy and sell books]
+    C --> E[Trades and updated state]
+    E --> F[Display formats output]
+```
+
+The following sections will explain in more detail each module and its nuances.
+
 ## Models:
 
+The Models module defines the content structure of an order and a trade, as well as validation functions for the data types.
 
 ### Order structure:
 | Field | Meaning |
@@ -27,6 +42,19 @@ The architecture is divided in 5 main components:
 
 There are also enumerations defined in the Models, respective to the Side of an order (BUY or SELL), the OrderKind (LIMIT, MARKET, PEGGED) and the PegReference (BID, OFFER).
 These enums help with readability, validation and separation.
+
+### Trade structure:
+
+A trade is an execution between two orders. It is useful to store past order fills in the engine's execution history.
+
+| Field | Meaning |
+|---|---|
+| `buy_order_id` | ID of the buy order involved in the trade |
+| `sell_order_id` | ID of the sell order involved in the trade |
+| `price` | Execution price, stored as a `Decimal` |
+| `quantity` | Number of units executed in the trade |
+
+It is a frozen class because it records as completed execution, which is immutable after completion.
 
 ## Book:
 The book stores the orders themselves and keep them in price priority. It is used by the matching engine to determine the next executable order.
@@ -67,6 +95,8 @@ Adding separate counts and sorted prices was necessary to find fixed references.
 In short, `_levels` stores the orders. The other structures are indexes maintained alongside it. Their purpose is to answer common questions quickly. Every insertion and removal must keep those indexes consistent.
 
 ## Engine:
+
+The problem description provided a number of choices to be made in regards to the internal logic of the engine. The section below explains my decisions and assumptions clearly. These were implemented and thorougly tested, and work as intended.
 
 ### Logic:
 * When limit orders cross, the trade is executed at the resting order's price.
@@ -117,8 +147,6 @@ After matching:
 * For debugging: show individual orders, remaining quantities, IDs, priority order.
 
 
-
-
 ## CLI:
 
 The CLI reads and validates commands inputs from the user, sends to the engine to be executed (if valid), displays the results, and reads the next command.
@@ -148,6 +176,8 @@ Commands are lowercase. Quantities are positive integers and amendments refer to
 
 ## Tests:
 Testing was done for each model to check whether its behavior matched expectations. It was particularly important to test the engine's behavior against the assumptions stated in the [Logic](#logic) section.
+
+The engine required the most amount of testing, as it is the core of the system and incorporates all the logic and state transitions.
 
 ### Models tests:
 
