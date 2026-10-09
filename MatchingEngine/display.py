@@ -6,7 +6,7 @@ from itertools import zip_longest
 from .models import Order, Side
 
 
-def format_book(snapshot: dict[Side, tuple[tuple[Decimal, int], ...]]) -> str: # receives a book snapshot and prints it
+def format_book(snapshot: dict[Side, tuple[tuple[Decimal, int], ...]]) -> str: # receives a book snapshot
     """Show aggregated levels as independent buy/sell columns."""
     buys = [f"{quantity} @ {price:.2f}" for price, quantity in snapshot[Side.BUY]] # values are rounded to 2 decimal places only in text
     sells = [f"{quantity} @ {price:.2f}" for price, quantity in snapshot[Side.SELL]] # same

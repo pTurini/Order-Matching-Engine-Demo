@@ -30,8 +30,7 @@ These enums help with readability, validation and separation.
 
 ## Book:
 The book stores the orders themselves and keep them in price priority. It is used by the matching engine to determine the next executable order.
-
-It is essentially a FIFO queue ordered by best price, then by priority.
+The book stores queues and indexes to be used by the engine.
 
 | Structure | Contents | Purpose |
 |---|---|---|
@@ -41,6 +40,12 @@ It is essentially a FIFO queue ordered by best price, then by priority.
 | `_fixed_counts` | Price -> count of fixed limit orders | Track whether a price can be a peg reference |
 | `_fixed_prices` | Sorted prices containing fixed orders | Find the reference for pegged orders |
 
+
+
+### Optimization features:
+I made some optimizations to make the code run faster, mostly related to lookups. This allows the engine to run faster but has a memory drawback, with the use of extra dictionaries and arrays. This system is rather light-weight, so I assume it should not make a significant difference. However, I think it is nice to have and makes the system more scalable.
+
+`_locations`
 
 ## Engine:
 
@@ -92,8 +97,7 @@ After matching:
 * Order IDs are unique and never reused within a single session.
 * For debugging: show individual orders, remaining quantities, IDs, priority order.
 
-### Optimization features:
-I made some optimizations to make the code run faster, mostly related to lookups. This allows the engine to run faster but has a memory drawback, with the use of extra dictionaries and arrays. This system is rather light-weight, so I assume it should not make a significant difference. However, I think it is nice to have and makes the system more scalable.
+
 
 
 ## CLI:
@@ -121,27 +125,119 @@ Commands are lowercase. Quantities are positive integers and amendments refer to
 
 
 ## Tests:
-
-* Best-price matching and FIFO.
-* Partial fills and market remainder disposal.
-* Crossing limits with resting-price execution.
-* Cancellation after a partial fill.
-* Amendment priority changes and invalid zero quantities.
-* Peg movement after submission, cancellation, amendment, and execution.
-* Multiple pegs repricing together.
-* Opposite-side pegs consuming several reference levels.
-* Missing references and reactivation.
-* Invalid commands leaving the state unchanged.
+Testing was done for each model to check whether its behavior matched expectations. It was particularly important to test the engine's behavior against the assumptions stated in the [Logic](#logic) section.
 
 ### Models tests:
-* Exact limit prices and quantity reaching zero after a fill.
-* All four peg combinations waiting without a reference.
-* Market orders having no price.
-* Invalid quantities and prices.
-* Inconsistent type-specific fields.
-* Immutable, individual trade records.
 
+* Limit preserves exact price and can be filled.
+* All peg combinations can wait without reference.
+* Market has no price.
+* Invalid quantities and prices are rejected.
+* Inconsistent type specific fields are rejected.
+* Trade is an immutable individual execution.
 
+### Book tests:
+
+* Buy price priority then FIFO.
+* Sell lowest price first and empty book.
+* Remove middle order preserves FIFO and returns original.
+* Remove last order cleans level and updates best.
+* Remove unknown ID leaves book unchanged.
+* Location index stays synchronized when order moves.
+* Duplicate ID at different price does not change index.
+* Fixed references choose highest bid and lowest offer.
+* Last fixed removal clears reference even with peg remaining.
+* Partial fill does not change fixed order count.
+* Moving fixed order updates reference indexes.
+* All price index tracks unique levels until last order removed.
+* All price index includes peg only levels.
+* Invalid insertions leave book unchanged.
+
+### Engine tests:
+
+* Engine starts with two empty books.
+* Creation assigns IDs and priority without submitting.
+* Invalid creation does not change counters or books.
+* Buy executes at resting price and leaves resting remainder.
+* Sell selects best bid and removes fully filled order.
+* Same price FIFO and market has no price boundary.
+* Non crossing limits leave quantities unchanged.
+* Equal limit price is eligible and filled incoming cannot repeat.
+* Empty book and unpriced peg do not execute.
+* Buy sweeps prices then stops at limit.
+* History accumulates across orders and returns snapshot.
+* Passive limits rest on correct side.
+* Crossing limit rests remainder at its limit.
+* Market discards remainder and never rests.
+* Email example aggregation and command history boundaries.
+* Limit stops before ineligible level and exact prices stay separate.
+* Invalid submission leaves books history and counters unchanged.
+* Cancel middle order preserves other orders and counters.
+* Cancel partially filled sell preserves trade history.
+* Completed orders and market remainders leave lookup.
+* Limit remainder remains registered and can be cancelled.
+* Invalid and repeated cancellation leave state unchanged.
+* Reduction and no-op preserve priority on both sides.
+* Increase moves to back and execution respects new priority.
+* Amended quantity means remaining after partial fill.
+* Invalid quantity and inactive ID leave state unchanged.
+* New price repositions behind existing orders and keeps id.
+* Crossing price amendment returns only new trades and rests remainder.
+* Sell price change can fill completely and clean lookup.
+* Same price is no-op but changed price with reduction loses priority.
+* All fields are validated before any change.
+* Primary pegs join behind fixed orders on both sides.
+* All combinations wait without reference and can be cancelled.
+* Opposite side pegs execute and completed pegs leave registries.
+* Resting peg cleanup when filled and manual price rejected.
+* Invalid peg submission does not advance counters.
+* Multiple pegs move behind new fixed order in previous order.
+* Peg waits deactivates and reactivates.
+* Reference updates before market next fill.
+* Incoming opposite peg follows each reference and waits with remainder.
+* Unchanged reference preserves peg priority on quantity increase.
+* Price amendment moves peg to new fixed reference.
+* Waiting buy offer executes when fixed offer appears.
+* Multiple waiting pegs execute FIFO on both sides.
+* Repeated reference activation reports new trades only.
+* Aggressive incoming peg can fill resting primary peg.
+* Mixed commands leave consistent uncrossed books and conserve quantity.
+* Active pegged quantity amendments preserve or lose FIFO.
+* Sell bid peg sweeps changing references and retains remainder.
+* Repricing uses current queue order after peg quantity increase.
+* Order inspection returns copy that cannot change live state.
+* Inspected copy is a snapshot and inactive pegs are accessible.
+* Unknown invalid cancelled and completed orders cannot be inspected.
+* Aggregated snapshot uses remaining quantity exact prices and best order.
+* Debug snapshot preserves FIFO and copies live orders.
+* Inactive pegs are separate detached and ordered.
+* Snapshots do not change after later execution.
+
+### CLI tests:
+
+* Limit market and book share engine state.
+* Crossing limit and aggregated trade output.
+* Exact prices whitespace blank input and trade format.
+* Peg commands support all combinations and follow on trades.
+* Cancel command removes outstanding order.
+* Amend commands accept either field order and report crossing trades.
+* Invalid new commands are atomic.
+* Show and debug preserve exact prices remaining quantity and FIFO.
+* Empty debug and invalid inspection commands.
+* Invalid commands leave engine state unchanged.
+* Session reuses engine recovers from error and quits.
+* EOF and keyboard interrupt exit cleanly.
+* Help and quit require exact syntax.
+* Unexpected programming errors are not hidden.
+* Book is redrawn above latest command and error.
+* Screen clears only when output is a terminal.
+
+### Display tests:
+
+* Two columns keep snapshot order and handle unequal lengths.
+* Empty and single sided books.
+* Rounding is display only and does not merge exact levels.
+* Large values keep separator aligned.
 
 ## Extras(if time allows):
 
