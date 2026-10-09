@@ -1,10 +1,12 @@
-# MS-Strats-PTurini
-Repository for Morgan Stanley Strats coding project.
+# Simple Order Matching Engine
+
+
+Repository for a simple CLI based order matching engine coding project.
 
 ## Running the program
 
 Requires Python 3.11 or later; no third-party dependencies.
-From this directory (`MS-Strats-PTurini`), run:
+From this directory (`Order-Matching-Engine-Demo`), run:
 
 ```powershell
 python -m MatchingEngine.cli

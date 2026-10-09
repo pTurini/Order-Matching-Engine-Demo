@@ -15,20 +15,31 @@ The architecture is divided in 5 main components:
 
 
 ### Order structure:
-| Field | Function |
+| Field | Meaning |
 |---|---|
-| `id` | Unique identifier|
-| `side` | Buy/sell |
-| `kind` | Limit / pegged  |
-| `remaining_qty` | Quantity still available |
-| `limit_price` | Fixed price for a limit order |
-| `peg_reference` | Bid or offer for a pegged order |
-| `effective_price` | Current book price; absent for an inactive peg |
-| `priority_sequence` | Increasing number identifying its latest queue position |
+| `id` | Unique submission ID within an engine instance |
+| `side` / `kind` | Buy/sell and limit/market/pegged |
+| `remaining_qty` | Quantity still available to execute |
+| `priority_sequence` | Latest arrival-priority position |
+| `limit_price` | Fixed limit price, otherwise absent |
+| `peg_reference` | Bid/offer reference for pegs, otherwise absent |
+| `effective_price` | Current priced-book value; absent for markets/inactive pegs |
 
-
+There are also enumerations defined in the Models, respective to the Side of an order (BUY or SELL), the OrderKind (LIMIT, MARKET, PEGGED) and the PegReference (BID, OFFER).
+These enums help with readability, validation and separation.
 
 ## Book:
+The book stores the orders themselves and keep them in price priority. It is used by the matching engine to determine the next executable order.
+
+It is essentially a FIFO queue ordered by best price, then by priority.
+
+| Structure | Contents | Purpose |
+|---|---|---|
+| `_prices` | Sorted list of every occupied price | Find the best price (best buy last, best sell first) |
+| `_levels` | Price -> OrderedDict(ID -> Order) | FIFO at each price plus direct removal |
+| `_locations` | ID -> booked price | Find the correct level without scanning |
+| `_fixed_counts` | Price -> count of fixed limit orders | Track whether a price can be a peg reference |
+| `_fixed_prices` | Sorted prices containing fixed orders | Find the reference for pegged orders |
 
 
 ## Engine:
