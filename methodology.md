@@ -7,12 +7,12 @@ In this document, I will explain my methodology to solve this problem, as well a
 
 The architecture is divided in 5 main components:
 1. Models: contains the classes' structure and validation for all the corresponding data types (order, trade).
-2. Book: stores the market orders in the correct order.
+2. Book: stores resting limit orders and active pegged orders in price-time priority.
 3. Engine: contains the logic of the system and the operations that must be done, given a book.
 4. CLI: provides interface for the user, and sends the valid commands to the engine.
 5. Display: provides functions returning normal/debug book, individual order, and trade text to be fed to the CLI.
 
-Essentially, this system can be thought as a synchronous state machine, in which the state transitions are implemented through methods. The state consists of outstanding orders (type, side, quantity, price and priority) and completed trades. The state changes are triggered through oder submission, amendment or cancellation.
+Essentially, this system can be thought as a synchronous state machine, in which the state transitions are implemented through methods. The state consists of outstanding orders (type, side, quantity, price and priority) and completed trades. The state changes are triggered through order submission, amendment or cancellation.
 
 ```mermaid
 flowchart LR
@@ -54,10 +54,10 @@ A trade is an execution between two orders. It is useful to store past order fil
 | `price` | Execution price, stored as a `Decimal` |
 | `quantity` | Number of units executed in the trade |
 
-It is a frozen class because it records as completed execution, which is immutable after completion.
+It is a frozen class because it records a completed execution, which is immutable after completion.
 
 ## Book:
-The book stores the orders themselves and keep them in price priority. It is used by the matching engine to determine the next executable order.
+The book stores the orders themselves and keeps them in price priority. It is used by the matching engine to determine the next executable order.
 The book stores queues and indexes to be used by the engine.
 
 | Structure | Contents | Purpose |
@@ -68,7 +68,8 @@ The book stores queues and indexes to be used by the engine.
 | `_fixed_counts` | Price -> count of fixed limit orders | Track whether a price can be a peg reference |
 | `_fixed_prices` | Sorted prices containing fixed orders | Find the reference for pegged orders |
 
-The book also contains methods to `add` and `remove` orders from the book, as well as auxiliary methods to return the `best` price in the book for any given side, and to determine if the book `contains` an order of any given ID to be looked up.
+
+The book also contains methods to `add` and `remove` orders from the book, as well as auxiliary methods to return the oldest order at the `best` price in the book for any given side. This implements price priority followed by FIFO within each price level. There is also a method to determine if the book `contains` an order of any given ID to be looked up. 
 There are also methods for fetching the `fixed_reference` used by peg refreshing, and to return the `orders` and `levels` for taking snapshots in the display module.
 
 
@@ -77,8 +78,10 @@ I made some optimizations to make the code run faster, mostly related to lookups
 
 
 
-Initially, for `_levels`, each price held a list to preserve FIFO behavior. However, to cancel an order, that would need a search and subsequent shift in the array. So I implemented an `OrderedDict` keyed by ID. This protects insertion order (still FIFO), while allowing removal in O(1) time:
+Initially, for `_levels`, each price held a list to preserve FIFO behavior. However, to cancel an order, that would need a search and subsequent shift in the array. So I implemented an `OrderedDict` keyed by ID. This protects insertion order (still FIFO), while allowing removal in average O(1) time:
 ```self._levels: dict[Decimal, OrderedDict[str, Order]] = {}```
+
+However, complete cancellation can also require O(L) sorted-list shifts, peg refreshing, and resulting matches. 
 
 For finding an order's price, the `_locations` dictionary has the order ID as the key, and the price as its value. This is useful for removal. Previously, `remove` searched the price levels and their queues until it found the ID.
 Both of the aforementioned changes were necessary to avoid the search:
@@ -89,14 +92,15 @@ order = self._levels[price].pop(order_id)
 
 Also, `best` used the functions `max(self._levels)` for buy, and `min(self._levels)` for sell. These scan all L prices, so it was O(L). Instead, by using an ascending list, `_prices`, it is enough to index the last element `_prices[-1]` for the best buy, or the first, `_prices[0]` for the best sell.
 
-Adding separate counts and sorted prices was necessary to find fixed references. `_fixed_counts` stores the amount of remaining at each price level. It does not count, by definition, pegged orders. If the amount reaches zero, that price level is deleted.
-`_fixed_prices`, in turn, is a sorted list containing all available price levels (with count greater than 1, as stated above). The last element supplies the fixed bid, and the first supplies the fixed offer. This list excludes prices supported only by pegs.
+Adding separate counts and sorted prices was necessary to find fixed references. `_fixed_counts` stores the amount of  fixed limit orders remaining at each price level. It does not count, by definition, pegged orders. When the count reaches zero, the price is removed from `_fixed_counts` and `_fixed_prices`. The general price level remains until its queue is empty.
+
+`_fixed_prices`, in turn, is a sorted list containing all available price levels (with count greater than 0, as stated above). The last element supplies the fixed bid, and the first supplies the fixed offer. 
 
 In short, `_levels` stores the orders. The other structures are indexes maintained alongside it. Their purpose is to answer common questions quickly. Every insertion and removal must keep those indexes consistent.
 
 ## Engine:
 
-The problem description provided a number of choices to be made in regards to the internal logic of the engine. The section below explains my decisions and assumptions clearly. These were implemented and thorougly tested, and work as intended.
+The problem description provided a number of choices to be made in regards to the internal logic of the engine. The section below explains my decisions and assumptions. These were implemented and work as intended, as far as the tests go.
 
 ### Logic:
 * When limit orders cross, the trade is executed at the resting order's price.
@@ -114,6 +118,12 @@ The problem description provided a number of choices to be made in regards to th
 * If a peg's updated price crosses, it is executed.
 * Pegged order's quantity can be amended, following the same rules as a normal order (decrease keeps priority, increase loses).
 * Pegs support buy-to-bid, sell-to-offer, buy-to-offer, sell-to-bid.
+
+Crossing limit orders execute because their limits permit trading against the available opposite-side prices. Execution uses the resting order’s price, which satisfies the incoming order’s limit. Any unmatched quantity rests at its submitted limit price.
+
+Peg references use only fixed limit orders to avoid self-reference. Otherwise, a peg could sustain its own obsolete price after the fixed orders supporting that reference disappear.
+
+Quantity increases lose priority because the additional quantity should not move ahead of orders already waiting. Reductions retain priority because they add no new quantity. Price changes lose priority because the order is entering a queue at a different price.
 
 ### Order logic:
 For one incoming order:
@@ -137,14 +147,26 @@ After matching:
 - A market remainder is discarded.
 - A peg remainder rests at its reference price or becomes inactive if no reference exists.
 
+### Peg logic:
+Pegged orders add a layer of complexity to the logic implemented in the engine.
+* References refresh between fills. Newly executable resting pegs receive matching turns after the current incoming turn finishes.
+* Incoming fixed orders become references only when their remainders rest.
+* During settlement, the engine examines the best buy and sell. If the pair crosses and contains one peg, that peg takes the incoming role. If both are pegs, the order with the lowest priority takes the incoming role. The opposite resting order supplies the execution price.
+* A matching turn does not guarantee a complete fill. A peg may fill partially, rest with a remainder, or become inactive if its reference disappears. Settlement repeats until no executable crossing remains.
+
+
 ### Design decisions and invalid values:
 * On the interface, orders with same price are combined. But internally they have their own IDs and are treated separately.
 * Invalid input rejects, gives error message and does nothing to the book.
 * Quantity is an integer. No fractional shares.
-* Price must be positive and greater than zero.
+* Price must be positive, finite Decimal.
 * Price precision is exact, but interface shows fixed at 0.01 precision.
 * Order IDs are unique and never reused within a single session.
 * For debugging: show individual orders, remaining quantities, IDs, priority order.
+
+### Implementation details:
+
+
 
 
 ## CLI:
@@ -172,12 +194,20 @@ Commands are lowercase. Quantities are positive integers and amendments refer to
 
 ## Display:
 
+The Display module contains pure formatting functions that receive data and return strings. The engine provides detached snapshots so inspection and formatting cannot modify the engine's state. The CLI handles printing by receiving snapshots from the display.
 
+The normal book view output aggregates remaining quantities by exact price and formats prices to two decimal places. For debugging, the debug output shows individual orders, IDs, remaining quantities, priority sequences, exact prices, and inactive pegs. 
+
+It is important to note that distinct exact prices remain separate levels even when their formatted values look identical
+
+The engine records each individual execution separately. For command output, executions at the same exact price are aggregated within that command. For example, fills of 100 and 50 shares at price 20 produce one output line showing 150 shares, while retaining two execution records internally.
 
 ## Tests:
 Testing was done for each model to check whether its behavior matched expectations. It was particularly important to test the engine's behavior against the assumptions stated in the [Logic](#logic) section.
 
 The engine required the most amount of testing, as it is the core of the system and incorporates all the logic and state transitions.
+
+The suite contains 97 test methods covering matching, FIFO priority, partial fills, amendments, cancellation, peg behavior, validation, snapshots, formatting, and CLI behavior. A deterministic mixed-command test checks book consistency and quantity conservation after each command. These tests provide evidence for the specified behavior without, of course, proving correctness for every possible input.
 
 <details>
 <summary><strong>Models tests (6)</strong></summary>
