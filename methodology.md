@@ -74,7 +74,9 @@ There are also methods for fetching the `fixed_reference` used by peg refreshing
 
 
 ### Optimization features:
-I made some optimizations to make the code run faster, mostly related to lookups. This allows the engine to run better but has a memory drawback, with the use of extra dictionaries and arrays. This system is rather light-weight, so I assume it should not make a significant difference. However, I think it is nice to have and makes the system more scalable.
+These indexes reduce lookup and queue-removal costs at the expense of additional memory and index maintenance.
+
+Let `L` be the number of occupied price levels. Both insertion and removal of sorted-list entries can cost O(L), because shifting list elements dominates the O(log L) search for their positions.
 
 
 
@@ -84,7 +86,7 @@ Initially, for `_levels`, each price held a list to preserve FIFO behavior. Howe
 However, complete cancellation can also require O(L) sorted-list shifts, peg refreshing, and resulting matches. 
 
 For finding an order's price, the `_locations` dictionary has the order ID as the key, and the price as its value. This is useful for removal. Previously, `remove` searched the price levels and their queues until it found the ID.
-Both of the aforementioned changes were necessary to avoid the search:
+These two changes work together in this implementation to avoid the search:
 ```
 price = self._locations[order_id]
 order = self._levels[price].pop(order_id)
@@ -115,7 +117,7 @@ The problem description provided a number of choices to be made in regards to th
 * Pegs are updated after every book changing event, before next match.
 * A peg that changes price joins the back of its new price queue (lowest priority).
 * Multiple pegs that move together keep their relative order.
-* If a peg's updated price crosses, it is executed.
+* If a peg's updated price crosses, it becomes eligible for matching, subject to the scheduling rules below.
 * Pegged order's quantity can be amended, following the same rules as a normal order (decrease keeps priority, increase loses).
 * Pegs support buy-to-bid, sell-to-offer, buy-to-offer, sell-to-bid.
 
@@ -151,7 +153,7 @@ After matching:
 Pegged orders add a layer of complexity to the logic implemented in the engine.
 * References refresh between fills. Newly executable resting pegs receive matching turns after the current incoming turn finishes.
 * Incoming fixed orders become references only when their remainders rest.
-* During settlement, the engine examines the best buy and sell. If the pair crosses and contains one peg, that peg takes the incoming role. If both are pegs, the order with the lowest priority takes the incoming role. The opposite resting order supplies the execution price.
+* During settlement, the engine examines the best buy and sell. If the pair crosses and contains one peg, that peg takes the incoming role. If both are pegs, the order with the larger current `priority_sequence` takes the incoming role. The opposite resting order supplies the execution price.
 * A matching turn does not guarantee a complete fill. A peg may fill partially, rest with a remainder, or become inactive if its reference disappears. Settlement repeats until no executable crossing remains.
 
 
@@ -160,7 +162,7 @@ Pegged orders add a layer of complexity to the logic implemented in the engine.
 * Invalid input rejects, gives error message and does nothing to the book.
 * Quantity is an integer. No fractional shares.
 * Price must be positive, finite Decimal.
-* Price precision is exact, but interface shows fixed at 0.01 precision.
+* Input prices are stored exactly as `Decimal` values. Normal output formats prices to two decimal places, but no tick-size restriction is enforced.
 * Order IDs are unique and never reused within a single session.
 * For debugging: show individual orders, remaining quantities, IDs, priority order.
 
@@ -182,7 +184,7 @@ The `MatchingEngine` class maintains the following attributes:
 
 The books and registries reference the same order objects. Therefore, a partial fill updates one object’s `remaining_qty`, and that change is visible wherever the object is referenced.
 
-The` _orders` registry also contains inactive pegs, which have no effective price and therefore cannot occupy a book queue. `_pegs` contains both active and inactive pegs.
+The `_orders` registry also contains inactive pegs, which have no effective price and therefore cannot occupy a book queue. `_pegs` contains both active and inactive pegs.
 
 The public methods `submit_limit`, `submit_market`, and `submit_peg` provide the entry points for new orders. Each calls `_create_order` with the appropriate order kind and fields, then passes the resulting order to `_submit`. Peg submissions also register the order in `_pegs`.
 
@@ -199,6 +201,9 @@ The public methods `submit_limit`, `submit_market`, and `submit_peg` provide the
 8. Return a `CommandResult` containing the executions generated during this command.
 
 Keeping the incoming order outside the book separates the order taking a matching turn from the resting orders supplying liquidity.
+
+`_finish_incoming` removes fully filled orders and market orders from the registries. A priced limit or peg remainder enters its corresponding book. An unpriced peg remainder remains registered outside the book until a reference becomes available.
+
 #### Matching:
 `_match` repeatedly calls `best()` on the opposite book. It stops when the incoming quantity reaches 0, the opposite book is empty, or the best resting price is unacceptable.
 
@@ -207,11 +212,15 @@ Market orders have no price boundary. Limit and pegged buys accept prices at or 
 The matching method creates a `Trade` at the resting order’s effective price, then appends it to `_trades`, and reduces both quantities. A fully filled resting order is removed from its book and registries. A fully filled incoming order is also removed from the registries. Pegs refresh after every fill, before the next resting order is selected.
 #### Cancellation and amendments:
 `_require_order` validates an ID and retrieves its live order from `_orders`. Unknown, completed, or cancelled IDs raise `ValueError` before mutation.
+
 `cancel` removes the order from its book if it is priced, then calls `_forget` to remove its registry entries. It refreshes pegs and settles crossings because removing a fixed order can change references.
-`_forget` removes an order from `_orders` and `_pegs`. Book removal is handled separately by the method. Completed trades remain in `_trades`.
+
+`_forget` removes an order from `_orders` and `_pegs`. Book removal is handled separately by the calling method. Completed trades remain in `_trades`.
 
 
 `amend` validates every supplied field before changing the order (but it always preserves the order ID). Quantities must be positive integers, and manual price amendments are restricted to fixed limit orders. An important implementation detail is that a price change can execute immediately through the same matching process as a new submission.
+
+A quantity reduction or no-op updates the order without removing its queue entry. A quantity increase removes and reinserts the order with a new priority sequence. A price change removes the old entry, updates the price and quantity, assigns new priority, and calls `_submit` to match again before resting any remainder.
 
 For a quantity-only increase, removal and reinsertion happen before peg refreshing. This prevents the temporary removal of a fixed order from unnecessarily changing its peg reference.
 
@@ -222,7 +231,7 @@ It sorts outstanding pegs by their current `priority_sequence`, then updates the
 1. Remove all pegs whose effective prices have changed from their existing queues.
 2. Assign their new effective prices and priority sequences, then reinsert priced pegs in their previous relative order.
 
-An unchanged effective price preserves priority. A disappearing reference sets the effective price to `None`, and the peg rests outside the book until a returning reference activates it again.
+An unchanged effective price preserves priority. A disappearing reference sets the effective price to `None`, and the peg waits outside the book until a returning reference activates it again.
 
 The `_incoming_id` check prevents the currently matching peg from being inserted into a queue during this process. Its effective price still updates, allowing its next matching decision to use the new reference.
 
@@ -257,6 +266,8 @@ In contrast, using `return self._require_order(order_id)`, for example, would re
 | `trades` | Tuple of individual executions generated by the command |
 | `discarded_qty` | Unfilled market quantity discarded during submission |
 
+Before processing a command, the engine records the current length of `_trades`. After matching and peg settlement finish, it returns only the trades appended from that position. Earlier executions remain in history but are excluded from the command result to be printed, to avoid bloating the interface.
+
 `aggregated_trades()` combines quantities at the same exact price within the command, but individual executions remain available in trades and the engine’s history, while the CLI can display aggregated quantities.
 
 ## CLI:
@@ -284,9 +295,9 @@ Commands are lowercase. Quantities are positive integers and amendments refer to
 
 ## Display:
 
-The Display module contains pure formatting functions that receive data and return strings. The engine provides detached snapshots so inspection and formatting cannot modify the engine's state. The CLI handles printing by receiving snapshots from the display.
+The Display module contains pure formatting functions that receive data and return strings. The engine provides snapshots so inspection and formatting cannot modify the engine's state. The CLI obtains snapshots from the engine, passes them to Display functions, and prints the returned strings.
 
-The normal book view output aggregates remaining quantities by exact price and formats prices to two decimal places. For debugging, the debug output shows individual orders, IDs, remaining quantities, priority sequences, exact prices, and inactive pegs. 
+The engine's book snapshot aggregates remaining quantities by exact price. The display module formats the already aggregated data to two decimal places. For debugging, the debug output shows individual orders, IDs, remaining quantities, priority sequences, exact prices, and inactive pegs.
 
 It is important to note that distinct exact prices remain separate levels even when their formatted values look identical
 
@@ -298,6 +309,8 @@ Testing was done for each model to check whether its behavior matched expectatio
 The engine required the most amount of testing, as it is the core of the system and incorporates all the logic and state transitions.
 
 The suite contains 97 test methods covering matching, FIFO priority, partial fills, amendments, cancellation, peg behavior, validation, snapshots, formatting, and CLI behavior. A deterministic mixed-command test checks book consistency and quantity conservation after each command. These tests provide evidence for the specified behavior without, of course, proving correctness for every possible input.
+
+You can run the tests from the `Order-Matching-Engine-Demo` directory with `python -m unittest discover -s tests -v`.
 
 <details>
 <summary><strong>Models tests (6)</strong></summary>
@@ -426,8 +439,3 @@ The suite contains 97 test methods covering matching, FIFO priority, partial fil
 
 </details>
 
-## Extras (if time allows):
-
-### Market-making:
-
-### Simulation:
