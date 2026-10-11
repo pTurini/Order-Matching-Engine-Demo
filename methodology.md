@@ -166,8 +166,98 @@ Pegged orders add a layer of complexity to the logic implemented in the engine.
 
 ### Implementation details:
 
+The engine controls the state transitions of the system. It uses the books to store and retrieve resting orders, applies matching and priority rules, updates pegged prices, and records completed executions.
+The `MatchingEngine` class maintains the following attributes:
+
+| Attribute | Contents | Purpose |
+|---|---|---|
+| `_buys` | `BookSide` for buy orders | Store resting buys and retrieve the best bid |
+| `_sells` | `BookSide` for sell orders | Store resting sells and retrieve the best offer |
+| `_id_counter` | Increasing integer | Assign unique IDs to newly created orders |
+| `_priority_counter` | Increasing integer | Assign priority sequences on creation or priority loss |
+| `_trades` | List of individual `Trade` records | Preserve execution history |
+| `_orders` | ID → outstanding `Order` | Find orders directly for cancellation, amendment, and inspection |
+| `_pegs` | ID → outstanding pegged `Order` | Identify orders requiring reference price updates |
+| `_incoming_id` | Current incoming order ID, or `None` | Prevent an incoming peg from entering the book while matching |
+
+The books and registries reference the same order objects. Therefore, a partial fill updates one object’s `remaining_qty`, and that change is visible wherever the object is referenced.
+
+The` _orders` registry also contains inactive pegs, which have no effective price and therefore cannot occupy a book queue. `_pegs` contains both active and inactive pegs.
+
+The public methods `submit_limit`, `submit_market`, and `submit_peg` provide the entry points for new orders. Each calls `_create_order` with the appropriate order kind and fields, then passes the resulting order to `_submit`. Peg submissions also register the order in `_pegs`.
+
+`_create_order` calculates the next ID and priority sequence, then constructs an `Order`. Construction runs the model’s validation. The counters are updated only after construction succeeds, so invalid creation does not consume an ID or priority sequence. This method creates the object without inserting it into a book.
+
+`_submit` coordinates the whole submission process:
+1. Save the current trade-history length.
+2. Register the order in `_orders` and set `_incoming_id`.
+3. Refresh pegged prices.
+4. Call `_match` to execute eligible trades.
+5. Record any discarded market quantity.
+6. Call `_finish_incoming` to handle the remainder.
+7. Clear `_incoming_id`, refresh pegs, and settle remaining crossings.
+8. Return a `CommandResult` containing the executions generated during this command.
+
+Keeping the incoming order outside the book separates the order taking a matching turn from the resting orders supplying liquidity.
+#### Matching:
+`_match` repeatedly calls `best()` on the opposite book. It stops when the incoming quantity reaches 0, the opposite book is empty, or the best resting price is unacceptable.
+
+Market orders have no price boundary. Limit and pegged buys accept prices at or below their effective price; sells accept prices at or above it. A peg without an effective price cannot match.
+
+The matching method creates a `Trade` at the resting order’s effective price, then appends it to `_trades`, and reduces both quantities. A fully filled resting order is removed from its book and registries. A fully filled incoming order is also removed from the registries. Pegs refresh after every fill, before the next resting order is selected.
+#### Cancellation and amendments:
+`_require_order` validates an ID and retrieves its live order from `_orders`. Unknown, completed, or cancelled IDs raise `ValueError` before mutation.
+`cancel` removes the order from its book if it is priced, then calls `_forget` to remove its registry entries. It refreshes pegs and settles crossings because removing a fixed order can change references.
+`_forget` removes an order from `_orders` and `_pegs`. Book removal is handled separately by the method. Completed trades remain in `_trades`.
 
 
+`amend` validates every supplied field before changing the order (but it always preserves the order ID). Quantities must be positive integers, and manual price amendments are restricted to fixed limit orders. An important implementation detail is that a price change can execute immediately through the same matching process as a new submission.
+
+For a quantity-only increase, removal and reinsertion happen before peg refreshing. This prevents the temporary removal of a fixed order from unnecessarily changing its peg reference.
+
+#### Peg refreshing:
+
+`_refresh_pegs` obtains the fixed bid and offer from the books’ `fixed_reference()` methods, taken before the pegs move.
+It sorts outstanding pegs by their current `priority_sequence`, then updates them in two stages:
+1. Remove all pegs whose effective prices have changed from their existing queues.
+2. Assign their new effective prices and priority sequences, then reinsert priced pegs in their previous relative order.
+
+An unchanged effective price preserves priority. A disappearing reference sets the effective price to `None`, and the peg rests outside the book until a returning reference activates it again.
+
+The `_incoming_id` check prevents the currently matching peg from being inserted into a queue during this process. Its effective price still updates, allowing its next matching decision to use the new reference.
+
+#### Settling crossed books:
+`_settle_crossings` handles executable resting pegs after an incoming turn finishes. It repeatedly examines the best buy and sell, stopping when either side is empty or the best buy price is below the best sell price.
+A remaining crossed pair must contain at least one peg. If neither order is pegged, the method raises `RuntimeError`, because ordinary fixed-order matching should have prevented that state from the start.
+If the pair contains one peg, that peg becomes incoming. If both are pegs, the one with the larger current priority sequence becomes incoming. The selected order is removed from its queue, and the engine reuses `_match` and `_finish_incoming`. References refresh before checking for another crossing.
+This keeps settlement iterative and reuses the existing execution rules, so no redundant methods were needed.
+
+#### Other functions:
+
+The other functions in the implementation are used to observe the state of the engine. The methods are as follows:
+
+| Method/property | Returned data |
+|---|---|
+| `trade_history` | Tuple of all completed trades |
+| `get_order(id)` | Detached copy of one outstanding order |
+| `book_snapshot()` | Remaining quantities aggregated by exact price, for both sides |
+| `debug_snapshot()` | Detached order copies in price/FIFO order |
+| `inactive_pegs()` | Detached inactive peg copies, sorted by priority sequence |
+
+I opted to create `Order` copies by using `dataclasses.replace`, so that mutating a returned order does not change the live engine order. Their fields contain immutable values, so shallow copies are sufficient. This method also runs the constructor and `__post_init__` validation again, checking that the copy satisfies the model’s validation rules
+In contrast, using `return self._require_order(order_id)`, for example, would return the same object the engine uses, allowing callers to modify engine state directly.
+
+#### Command results:
+
+`CommandResult` is a frozen dataclass defining the result of submission, cancellation, or amendment operations.
+
+| Field | Meaning |
+|---|---|
+| `order_id` | ID of the affected order |
+| `trades` | Tuple of individual executions generated by the command |
+| `discarded_qty` | Unfilled market quantity discarded during submission |
+
+`aggregated_trades()` combines quantities at the same exact price within the command, but individual executions remain available in trades and the engine’s history, while the CLI can display aggregated quantities.
 
 ## CLI:
 
